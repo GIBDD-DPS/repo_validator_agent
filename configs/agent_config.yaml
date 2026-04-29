@@ -1,0 +1,9 @@
+default_branch: main
+output_directory: fixed_files
+enable_legal_checks: true
+enable_hallucination_filter: true
+
+# Режим работы агента:
+# step — пошаговый (спрашивает y/n)
+# auto — автоматический (применяет сразу)
+mode: step
