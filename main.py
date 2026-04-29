@@ -1,161 +1,131 @@
-# main.py
-from fastapi import FastAPI, BackgroundTasks, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+"""
+Repo Validator Agent — FastAPI сервис для анализа репозиториев
+"""
+import os
 import uuid
-import logging
-from typing import Dict, Any
+import shutil
+from typing import Dict, List, Optional
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from pydantic import BaseModel, HttpUrl
 
-# Импорты твоих модулей (как в оригинале)
-from core.github_connector import GitHubConnector
 from core.repository_scanner import RepositoryScanner
-from core.file_analyzer import FileAnalyzer
 from core.project_analyzer import ProjectAnalyzer
+from core.fix_engine import StepFixEngine
+from core.linter_runner import LinterRunner
+from core.ast_analyzer import ASTAnalyzer
 from core.full_file_rewriter import FullFileRewriter
-from core.step_fix_engine import StepFixEngine
-from core.report_generator import ReportGenerator
-from core.copyright_manager import CopyrightManager
+from .config import settings
 
-from prizolov_integration.progress_metrics import ProgressMetrics
-from prizolov_integration.anti_hallucination_shield import AntiHallucinationShield
-from prizolov_integration.legal_compliance_officer import LegalComplianceOfficer
+# Эти классы пока не реализованы, заменяем на None
+# from prizolov_integration.progress_metrics import ProgressMetrics
+# from ai_agents.anti_hallucination_shield import AntiHallucinationShield
+# from ai_agents.legal_compliance_officer import LegalComplianceOfficer
 
-# --- Настройка логирования ---
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("repo_validator")
+app = FastAPI(title="Repo Validator Agent")
 
-# --- FastAPI app ---
-app = FastAPI(title="Repo Validator Agent API", version="1.0.0")
+# Временное хранилище сессий (только для демонстрации, в production – Redis)
+SESSIONS: Dict[str, dict] = {}
 
-# CORS: разрешаем фронтенду prizolov.ru обращаться к API
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["https://prizolov.ru", "http://localhost:3000"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+class RepoRequest(BaseModel):
+    repo_url: HttpUrl
+    branch: Optional[str] = None
 
-# Хранилище сессий (в простом виде, в продакшене заменить на БД)
-SESSIONS: Dict[str, Dict[str, Any]] = {}
-
-# Pydantic модели запросов/ответов
-class ScanRequest(BaseModel):
-    repo_url: str
-    branch: str | None = None
-
-class ScanResponse(BaseModel):
-    session_id: str
-    status: str
-
-class ReportResponse(BaseModel):
-    session_id: str
-    report: Dict[str, Any]
-
-# --- Фабрика/инициализация компонентов ---
 def create_components(repo_url: str):
-    github = GitHubConnector(repo_url)
-    scanner = RepositoryScanner(github)
-    file_analyzer = FileAnalyzer()
-    project_analyzer = ProjectAnalyzer()
-    copyright_manager = CopyrightManager()
-    rewriter = FullFileRewriter(copyright_manager)
-    report_generator = ReportGenerator()
-    metrics = ProgressMetrics()
-    shield = AntiHallucinationShield()
-    legal = LegalComplianceOfficer()
-    step_fix = StepFixEngine(rewriter, report_generator, metrics, shield, legal)
+    """Фабрика компонентов – создаёт все анализаторы для одного запуска."""
+    scanner = RepositoryScanner(repo_url)
+    scanner.clone()
+    files = scanner.scan_repository()
     return {
-        "github": github,
         "scanner": scanner,
-        "file_analyzer": file_analyzer,
-        "project_analyzer": project_analyzer,
-        "step_fix": step_fix,
-        "report_generator": report_generator,
-        "metrics": metrics,
+        "files": files,
+        "project_analyzer": ProjectAnalyzer(),
+        "ast_analyzer": ASTAnalyzer(),
+        "linter_runner": LinterRunner(),
+        "full_rewriter": FullFileRewriter(),
+        "step_fix_engine": StepFixEngine(),
+        "progress": None,            # Вместо ProgressMetrics()
+        "hallucination_shield": None, # Вместо AntiHallucinationShield()
+        "legal_officer": None,        # Вместо LegalComplianceOfficer()
     }
 
-# --- Фоновая задача: полный pipeline анализа ---
-def run_scan_pipeline(session_id: str, repo_url: str, branch: str | None = None):
-    logger.info("Session %s: starting scan for %s", session_id, repo_url)
-    try:
-        comps = create_components(repo_url)
-        scanner: RepositoryScanner = comps["scanner"]
-        file_analyzer: FileAnalyzer = comps["file_analyzer"]
-        project_analyzer: ProjectAnalyzer = comps["project_analyzer"]
-        step_fix: StepFixEngine = comps["step_fix"]
-        report_generator: ReportGenerator = comps["report_generator"]
-        metrics = comps["metrics"]
-
-        # 1) Скачиваем/сканируем репозиторий
-        # Предполагается, что scanner.scan_repository() возвращает dict {path: content}
-        files = scanner.scan_repository() if branch is None else scanner.scan_repository(branch=branch)
-
-        # 2) Анализ файлов
-        file_issues = {}
-        for file_path, content in files.items():
-            issues = file_analyzer.analyze_file(file_path, content)
-            file_issues[file_path] = issues
-            metrics.increment_files_analyzed()
-
-        # 3) Анализ проекта
-        project_issues = project_analyzer.analyze_project(files, file_issues)
-
-        # 4) Применение пошаговых фиксов
-        for file_path, issues in file_issues.items():
-            if not issues:
-                continue
-            step_fix.process_file(file_path, files[file_path], issues)
-
-        # 5) Генерация отчёта
-        final_report = report_generator.generate_final_report(file_issues, project_issues, metrics)
-
-        # Сохраняем результат в сессии
-        SESSIONS[session_id]["status"] = "done"
-        SESSIONS[session_id]["report"] = final_report
-        logger.info("Session %s: scan finished", session_id)
-    except Exception as e:
-        logger.exception("Session %s: scan failed: %s", session_id, e)
-        SESSIONS[session_id]["status"] = "failed"
-        SESSIONS[session_id]["error"] = str(e)
-
-# --- Эндпоинты ---
-
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
-
-@app.post("/scan", response_model=ScanResponse, status_code=202)
-async def start_scan(req: ScanRequest, background_tasks: BackgroundTasks):
-    # Создаём сессию
-    session_id = str(uuid.uuid4())
-    SESSIONS[session_id] = {"status": "queued", "repo_url": req.repo_url}
-    # Запускаем фоновую задачу
-    background_tasks.add_task(run_scan_pipeline, session_id, req.repo_url, req.branch)
-    logger.info("Session %s: queued scan for %s", session_id, req.repo_url)
-    return ScanResponse(session_id=session_id, status="queued")
-
-@app.get("/report/{session_id}", response_model=ReportResponse)
-async def get_report(session_id: str):
+def run_analysis(session_id: str, repo_url: str):
+    """Фоновая задача: выполняет полный анализ и сохраняет результат."""
     session = SESSIONS.get(session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
-    if session.get("status") != "done":
-        return ReportResponse(session_id=session_id, report={"status": session.get("status"), "message": session.get("error", "")})
-    return ReportResponse(session_id=session_id, report=session.get("report"))
+        return
+    session["status"] = "in_progress"
+    try:
+        comps = create_components(repo_url)
+        files = comps["files"]
+        project_analyzer = comps["project_analyzer"]
+        ast_analyzer = comps["ast_analyzer"]
+        linter = comps["linter_runner"]
+        full_rewriter = comps["full_rewriter"]
+
+        # 1. Базовый разбор
+        project_issues = project_analyzer.analyze(files)
+
+        # 2. AST-анализ для Python файлов
+        ast_issues = {}
+        for path, content in files.items():
+            if path.endswith(".py"):
+                ast_issues[path] = ast_analyzer.analyze(content)
+
+        # 3. Линтеры
+        lint_issues = linter.run_all(files)
+
+        # 4. Сборка результата
+        report = {
+            "project_issues": project_issues,
+            "ast_issues": ast_issues,
+            "lint_issues": lint_issues,
+        }
+        session["report"] = report
+        session["status"] = "done"
+    except Exception as e:
+        session["status"] = "error"
+        session["error"] = str(e)
+
+@app.post("/scan")
+async def start_scan(request: RepoRequest, background_tasks: BackgroundTasks):
+    """Запускает анализ репозитория, возвращает ID сессии."""
+    session_id = str(uuid.uuid4())
+    SESSIONS[session_id] = {
+        "repo_url": str(request.repo_url),
+        "status": "pending",
+        "report": None
+    }
+    background_tasks.add_task(run_analysis, session_id, str(request.repo_url))
+    return {"session_id": session_id}
+
+@app.get("/status/{session_id}")
+async def get_status(session_id: str):
+    """Возвращает статус сессии и (если готов) отчёт."""
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Сессия не найдена")
+    resp = {"session_id": session_id, "status": session["status"]}
+    if session["status"] == "done":
+        resp["report"] = session["report"]
+    elif session["status"] == "error":
+        resp["error"] = session["error"]
+    return resp
 
 @app.post("/fix/{session_id}")
 async def apply_fixes(session_id: str):
+    """Применяет автоматические исправления (заглушка)."""
     session = SESSIONS.get(session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail="Сессия не найдена")
     if session.get("status") != "done":
-        raise HTTPException(status_code=400, detail="Report not ready")
-    # Здесь можно вызвать шаги применения фиксов (если report содержит инструкции)
-    # Пример: step_fix.apply_report(session["report"])
-    return {"session_id": session_id, "status": "fixes_not_implemented_in_api"}
+        raise HTTPException(status_code=400, detail="Отчёт ещё не готов")
+    # В реальной версии здесь будет запуск StepFixEngine
+    # return {"session_id": session_id, "fixes_applied": [...]}
+    raise HTTPException(status_code=501, detail="Автофиксы отключены (API в разработке)")
 
-# --- Запуск через uvicorn (для локальной отладки) ---
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+@app.on_event("shutdown")
+async def cleanup():
+    """Очистка временных клонов."""
+    tmp = "/tmp/repo_scan"
+    if os.path.exists(tmp):
+        shutil.rmtree(tmp, ignore_errors=True)
