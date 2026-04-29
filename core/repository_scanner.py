@@ -1,52 +1,74 @@
 import os
-from dataclasses import dataclass
-from typing import List
-
-
-@dataclass
-class FileEntry:
-    path: str
-    rel_path: str
-    size: int
-    is_text: bool
-    content: str | None
-
+import subprocess
+from typing import List, Optional, Dict
+from pathlib import Path
+import chardet
+from .base import FileEntry
 
 class RepositoryScanner:
-    def __init__(self, root_dir: str):
-        self.root_dir = root_dir
+    """Сканер для клонирования и анализа файлов репозитория."""
+
+    def __init__(self, repo_url: str, local_path: str = "/tmp/repo_scan"):
+        self.repo_url = repo_url
+        self.local_path = local_path
+
+    def clone(self, branch: str | None = None) -> None:
+        """Клонирует репозиторий (или обновляет существующий)."""
+        if os.path.exists(self.local_path):
+            subprocess.run(["git", "-C", self.local_path, "pull"], check=True)
+        else:
+            cmd = ["git", "clone", self.repo_url, self.local_path]
+            if branch:
+                cmd += ["--branch", branch]
+            subprocess.run(cmd, check=True)
 
     def scan(self) -> List[FileEntry]:
-        files: List[FileEntry] = []
-
-        for dirpath, dirnames, filenames in os.walk(self.root_dir):
-            for filename in filenames:
-                full_path = os.path.join(dirpath, filename)
-                rel_path = os.path.relpath(full_path, self.root_dir)
-
+        """Сканирует локальный репозиторий и возвращает список объектов FileEntry."""
+        entries = []
+        for root, dirs, files in os.walk(self.local_path):
+            # Пропускаем скрытые папки (начинающиеся с точки, например .git)
+            dirs[:] = [d for d in dirs if not d.startswith('.')]
+            for file in files:
+                if file.startswith('.'):
+                    continue
+                full_path = os.path.join(root, file)
+                rel_path = os.path.relpath(full_path, self.local_path)
+                # Определяем, текстовый ли файл
                 try:
-                    size = os.path.getsize(full_path)
-                except OSError:
-                    size = 0
-
-                content = None
-                is_text = False
-                try:
-                    with open(full_path, "r", encoding="utf-8") as f:
-                        content = f.read()
+                    with open(full_path, 'rb') as f:
+                        raw = f.read(1024)
+                    encoding = chardet.detect(raw)['encoding']
+                    if encoding:
+                        with open(full_path, 'r', encoding=encoding) as f:
+                            content = f.read()
                         is_text = True
+                    else:
+                        content = None
+                        is_text = False
                 except Exception:
                     content = None
                     is_text = False
+                entries.append(FileEntry(
+                    path=full_path,
+                    rel_path=rel_path,
+                    content=content,
+                    is_text=is_text
+                ))
+        return entries
 
-                files.append(
-                    FileEntry(
-                        path=full_path,
-                        rel_path=rel_path,
-                        size=size,
-                        is_text=is_text,
-                        content=content,
-                    )
-                )
-
-        return files
+    # ===== ВОТ ЭТОТ БЛОК ДОБАВЛЯЕМ =====
+    def scan_repository(self, branch: str | None = None) -> Dict[str, str]:
+        """
+        Сканирует репозиторий и возвращает словарь {относительный_путь: содержимое_файла}.
+        Этот метод нужен, чтобы main.py мог получить все файлы разом.
+        """
+        if branch:
+            self.clone(branch)      # клонируем конкретную ветку
+        else:
+            self.clone()            # клонируем главную ветку
+        result = {}
+        for entry in self.scan():
+            # Берём только читаемые текстовые файлы
+            if entry.is_text and entry.content is not None:
+                result[entry.rel_path] = entry.content
+        return result
