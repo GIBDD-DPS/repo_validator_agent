@@ -143,3 +143,6 @@ async def cleanup():
     tmp = "/tmp/repo_scan"
     if os.path.exists(tmp):
         shutil.rmtree(tmp, ignore_errors=True)
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=80)
