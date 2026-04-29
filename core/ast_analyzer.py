@@ -1,145 +1,73 @@
 import ast
-from typing import List
-
+from typing import List, Dict
 
 class ASTAnalyzer:
-    """
-    Анализирует Python-файлы через AST.
-    Находит:
-    - неиспользуемые импорты
-    - пустые функции
-    - функции без docstring
-    - слишком длинные функции
-    - классы без методов
-    - переменные, объявленные но не использованные
-    """
+    """Анализирует Python-код через AST для поиска проблем."""
 
-    def analyze(self, file_path: str, content: str) -> List[str]:
+    def analyze(self, code: str) -> List[str]:
+        """
+        Принимает исходный код, возвращает список найденных проблем.
+        """
         issues = []
-
         try:
-            tree = ast.parse(content)
+            tree = ast.parse(code)
         except SyntaxError as e:
             issues.append(f"Синтаксическая ошибка: {e}")
             return issues
 
-        # --- 1. Неиспользуемые импорты ---
-        issues.extend(self._check_unused_imports(tree))
-
-        # --- 2. Пустые функции ---
-        issues.extend(self._check_empty_functions(tree))
-
-        # --- 3. Функции без docstring ---
-        issues.extend(self._check_missing_docstrings(tree))
-
-        # --- 4. Слишком длинные функции ---
-        issues.extend(self._check_long_functions(tree))
-
-        # --- 5. Классы без методов ---
-        issues.extend(self._check_empty_classes(tree))
-
-        # --- 6. Неиспользуемые переменные ---
+        # Проверка на неиспользуемые переменные
         issues.extend(self._check_unused_variables(tree))
 
-        return issues
-
-    # --------------------------
-    # Правило 1: неиспользуемые импорты
-    # --------------------------
-    def _check_unused_imports(self, tree):
-        issues = []
-        imported = set()
-        used = set()
-
-        class ImportVisitor(ast.NodeVisitor):
-            def visit_Import(self, node):
-                for alias in node.names:
-                    imported.add(alias.asname or alias.name.split('.')[0])
-
-            def visit_ImportFrom(self, node):
-                for alias in node.names:
-                    imported.add(alias.asname or alias.name)
-
-            def visit_Name(self, node):
-                used.add(node.id)
-
-        ImportVisitor().visit(tree)
-
-        unused = imported - used
-        for name in unused:
-            issues.append(f"Неиспользуемый импорт: {name}")
+        # Проверка на "опасные" вызовы (eval, exec)
+        issues.extend(self._check_dangerous_calls(tree))
 
         return issues
 
-    # --------------------------
-    # Правило 2: пустые функции
-    # --------------------------
-    def _check_empty_functions(self, tree):
-        issues = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef):
-                if len(node.body) == 1 and isinstance(node.body[0], ast.Pass):
-                    issues.append(f"Пустая функция: {node.name}")
-        return issues
+    # ============================================================
+    # Вспомогательные методы
+    # ============================================================
 
-    # --------------------------
-    # Правило 3: функции без docstring
-    # --------------------------
-    def _check_missing_docstrings(self, tree):
-        issues = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef):
-                if ast.get_docstring(node) is None:
-                    issues.append(f"Функция без docstring: {node.name}")
-        return issues
-
-    # --------------------------
-    # Правило 4: слишком длинные функции
-    # --------------------------
-    def _check_long_functions(self, tree, max_len=50):
-        issues = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef):
-                if hasattr(node, "body"):
-                    length = len(node.body)
-                    if length > max_len:
-                        issues.append(f"Слишком длинная функция ({length} строк): {node.name}")
-        return issues
-
-    # --------------------------
-    # Правило 5: классы без методов
-    # --------------------------
-    def _check_empty_classes(self, tree):
-        issues = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ClassDef):
-                methods = [n for n in node.body if isinstance(n, ast.FunctionDef)]
-                if not methods:
-                    issues.append(f"Класс без методов: {node.name}")
-        return issues
-
-    # --------------------------
-    # Правило 6: неиспользуемые переменные
-    # --------------------------
-    def _check_unused_variables(self, tree):
-        issues = []
+    def _check_unused_variables(self, tree: ast.AST) -> List[str]:
+        """Находит переменные, которым присвоили значение, но не использовали."""
         assigned = set()
         used = set()
 
         class VarVisitor(ast.NodeVisitor):
             def visit_Assign(self, node):
                 for target in node.targets:
+                    # ✅ ИСПРАВЛЕНО: проверяем, что цель – простое имя (a = 1)
                     if isinstance(target, ast.Name):
                         assigned.add(target.id)
+                    # Игнорируем кортежи, списки, атрибуты (a, b = ..., obj.x = ...)
+                self.generic_visit(node)
 
             def visit_Name(self, node):
                 if isinstance(node.ctx, ast.Load):
                     used.add(node.id)
+                self.generic_visit(node)
 
-        VarVisitor().visit(tree)
+        visitor = VarVisitor()
+        visitor.visit(tree)
 
         unused = assigned - used
-        for var in unused:
-            issues.append(f"Неиспользуемая переменная: {var}")
+        return [f"Переменная '{v}' присвоена, но не используется" for v in unused]
 
+    def _check_dangerous_calls(self, tree: ast.AST) -> List[str]:
+        """Проверяет использование eval/exec."""
+        issues = []
+
+        class DangerVisitor(ast.NodeVisitor):
+            def visit_Call(self, node):
+                # Получаем имя функции, если это простой вызов
+                func_name = None
+                if isinstance(node.func, ast.Name):
+                    func_name = node.func.id
+                elif isinstance(node.func, ast.Attribute):
+                    func_name = node.func.attr
+
+                if func_name in ('eval', 'exec'):
+                    issues.append(f"Использование опасной функции: {func_name}()")
+                self.generic_visit(node)
+
+        DangerVisitor().visit(tree)
         return issues
