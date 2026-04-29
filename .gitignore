@@ -1,0 +1,35 @@
+@'
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and temp
+*.log
+tmp/
+temp/
+
+# Docker and env
+.env
+*.env
+
+# Reports / fixed files (optional)
+fixed_files/*.html
+fixed_files/*.json
+fixed_files/*.txt
+'@ | Out-File -Encoding utf8 .gitignore
