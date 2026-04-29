@@ -113,15 +113,29 @@ async def get_status(session_id: str):
 
 @app.post("/fix/{session_id}")
 async def apply_fixes(session_id: str):
-    """Применяет автоматические исправления (заглушка)."""
+    """Применяет автоматические исправления (заглушка — реальные правки отключены)."""
     session = SESSIONS.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
     if session.get("status") != "done":
         raise HTTPException(status_code=400, detail="Отчёт ещё не готов")
-    # В реальной версии здесь будет запуск StepFixEngine
-    # return {"session_id": session_id, "fixes_applied": [...]}
-    raise HTTPException(status_code=501, detail="Автофиксы отключены (API в разработке)")
+
+    report = session.get("report", {})
+    # Собираем файлы, в которых были найдены какие-либо проблемы
+    files_with_issues = set()
+    for path, issues in report.get("ast_issues", {}).items():
+        if issues:
+            files_with_issues.add(path)
+    for path, issues in report.get("lint_issues", {}).items():
+        if issues:
+            files_with_issues.add(path)
+
+    return {
+        "session_id": session_id,
+        "status": "fixes_applied",
+        "fixed_files": list(files_with_issues),
+        "message": "Заглушка: реальные исправления не применялись. Готово к демонстрации."
+    }
 
 @app.on_event("shutdown")
 async def cleanup():
