@@ -5,7 +5,9 @@ import os
 import uuid
 import shutil
 from typing import Dict, List, Optional
+
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware   # ← добавляем поддержку CORS
 from pydantic import BaseModel, HttpUrl
 
 from core.repository_scanner import RepositoryScanner
@@ -14,7 +16,7 @@ from core.fix_engine import StepFixEngine
 from core.linter_runner import LinterRunner
 from core.ast_analyzer import ASTAnalyzer
 from core.full_file_rewriter import FullFileRewriter
-from config import settings             # ✅ исправлено: теперь без точки
+from config import settings
 
 # Эти классы пока не реализованы, заменяем на None
 # from prizolov_integration.progress_metrics import ProgressMetrics
@@ -22,6 +24,22 @@ from config import settings             # ✅ исправлено: теперь
 # from ai_agents.legal_compliance_officer import LegalComplianceOfficer
 
 app = FastAPI(title="Repo Validator Agent")
+
+# ----- НАСТРОЙКА CORS -----
+origins = [
+    "https://prizolov.ru",          # твой основной сайт
+    "http://localhost",             # для локального тестирования
+    "http://127.0.0.1",
+    # можешь добавить другие адреса, если необходимо
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,           # разрешённые источники
+    allow_credentials=True,
+    allow_methods=["*"],             # все HTTP-методы
+    allow_headers=["*"],             # все заголовки
+)
 
 # Временное хранилище сессий (только для демонстрации, в production – Redis)
 SESSIONS: Dict[str, dict] = {}
@@ -43,9 +61,9 @@ def create_components(repo_url: str):
         "linter_runner": LinterRunner(),
         "full_rewriter": FullFileRewriter(),
         "step_fix_engine": StepFixEngine(),
-        "progress": None,            # Вместо ProgressMetrics()
-        "hallucination_shield": None, # Вместо AntiHallucinationShield()
-        "legal_officer": None,        # Вместо LegalComplianceOfficer()
+        "progress": None,
+        "hallucination_shield": None,
+        "legal_officer": None,
     }
 
 def run_analysis(session_id: str, repo_url: str):
