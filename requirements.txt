@@ -1,3 +1,8 @@
+fastapi
+uvicorn[standard]
+pydantic
+chardet
 requests
-PyYAML
-rich
+flake8
+pylint
+bandit
