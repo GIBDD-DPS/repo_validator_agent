@@ -14,7 +14,7 @@ from core.fix_engine import StepFixEngine
 from core.linter_runner import LinterRunner
 from core.ast_analyzer import ASTAnalyzer
 from core.full_file_rewriter import FullFileRewriter
-from .config import settings
+from config import settings             # ✅ исправлено: теперь без точки
 
 # Эти классы пока не реализованы, заменяем на None
 # from prizolov_integration.progress_metrics import ProgressMetrics
@@ -121,7 +121,6 @@ async def apply_fixes(session_id: str):
         raise HTTPException(status_code=400, detail="Отчёт ещё не готов")
 
     report = session.get("report", {})
-    # Собираем файлы, в которых были найдены какие-либо проблемы
     files_with_issues = set()
     for path, issues in report.get("ast_issues", {}).items():
         if issues:
@@ -143,6 +142,7 @@ async def cleanup():
     tmp = "/tmp/repo_scan"
     if os.path.exists(tmp):
         shutil.rmtree(tmp, ignore_errors=True)
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=80)
