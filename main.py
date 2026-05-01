@@ -1,5 +1,5 @@
 """
-Repo Validator Agent — FastAPI сервис для анализа репозиториев (полная версия)
+Repo Validator Agent — FastAPI сервис для анализа репозиториев (линтеры + автофиксы)
 """
 import os
 import uuid
@@ -50,11 +50,10 @@ class InstallToolsRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str
 
-# Рекомендованные инструменты (заглушка)
 RECOMMENDED_TOOLS = [
-    {"name": "flake8", "description": "Линтер для проверки стиля кода"},
-    {"name": "pylint", "description": "Статический анализатор для поиска ошибок"},
-    {"name": "bandit", "description": "Поиск уязвимостей безопасности"},
+    {"name": "prizolov-optimizer", "description": "Автоматическая оптимизация кода"},
+    {"name": "prizolov-security", "description": "Поиск уязвимостей"},
+    {"name": "prizolov-style", "description": "Автоформатирование под стандарты"},
 ]
 
 def create_components(repo_url: str):
@@ -103,7 +102,7 @@ def run_analysis(session_id: str, repo_url: str):
         session["report"] = report
         session["optimization_recommended"] = RECOMMENDED_TOOLS
         session["status"] = "done"
-        # Сохраняем файлы для возможного скачивания
+        # Сохраняем копию файлов для возможности фиксов и скачивания
         session["files"] = files
     except Exception as e:
         session["status"] = "error"
@@ -171,13 +170,13 @@ async def get_changes(session_id: str):
     session = SESSIONS.get(session_id)
     if not session:
         raise HTTPException(404, "Сессия не найдена")
-    # Заглушка – реальный список изменений появится позже
     return {
         "session_id": session_id,
         "files_changed": [],
-        "patch_summary": "Автоматические исправления пока не реализованы.",
+        "patch_summary": "Для применения автоматических исправлений нажмите «Применить автофиксы».",
     }
 
+# ----- НОВЫЙ /fix: запускает автофиксы и возвращает исправленный ZIP -----
 @app.post("/fix/{session_id}")
 async def apply_fixes(session_id: str):
     session = SESSIONS.get(session_id)
@@ -185,19 +184,37 @@ async def apply_fixes(session_id: str):
         raise HTTPException(status_code=404, detail="Сессия не найдена")
     if session.get("status") != "done":
         raise HTTPException(status_code=400, detail="Отчёт ещё не готов")
-    # Заглушка
-    return {
-        "session_id": session_id,
-        "status": "fixes_applied",
-        "message": "Исправления применены (заглушка).",
-    }
+
+    engine = StepFixEngine()
+    files = session.get("files", {})
+    if not files:
+        raise HTTPException(500, "Нет файлов для обработки")
+
+    # Форматируем все Python-файлы
+    new_files = engine.format_all(files)
+    session["fixed_files"] = new_files  # сохраняем для последующей загрузки
+
+    # Формируем ZIP с исправленным кодом
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path, content in new_files.items():
+            zf.writestr(path, content)
+    zip_buffer.seek(0)
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename=repo_{session_id}_fixed.zip",
+            "X-Fixed-Files": ",".join(engine.fixes_applied)
+        }
+    )
 
 @app.post("/install_tools")
 async def install_tools(req: InstallToolsRequest):
     session = SESSIONS.get(req.session_id)
     if not session:
         raise HTTPException(404, "Сессия не найдена")
-    # Эмуляция установки – убираем установленные инструменты из рекомендаций
     installed = req.tools
     remaining = [t for t in session.get("optimization_recommended", []) if t["name"] not in installed]
     session["optimization_recommended"] = remaining
@@ -213,30 +230,28 @@ async def download_repo(session_id: str):
     session = SESSIONS.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
-    # Создаём ZIP из клонированного репозитория
-    scanner = RepositoryScanner(session["repo_url"])
-    try:
-        # Убедимся, что репозиторий склонирован
+    # Отдаём исправленный ZIP, если он есть, иначе исходный
+    if "fixed_files" in session:
+        files = session["fixed_files"]
+    else:
+        # Если фиксы не применялись, клонируем заново
+        scanner = RepositoryScanner(session["repo_url"])
         scanner.clone()
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, dirs, files in os.walk(scanner.local_path):
-                for file in files:
-                    full_path = os.path.join(root, file)
-                    arcname = os.path.relpath(full_path, scanner.local_path)
-                    zf.write(full_path, arcname)
-        zip_buffer.seek(0)
-        return StreamingResponse(
-            zip_buffer,
-            media_type="application/zip",
-            headers={"Content-Disposition": f"attachment; filename=repo_{session_id}.zip"}
-        )
-    except Exception as e:
-        raise HTTPException(500, f"Не удалось создать архив: {str(e)}")
+        files = scanner.scan_repository()
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path, content in files.items():
+            zf.writestr(path, content)
+    zip_buffer.seek(0)
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=repo_{session_id}.zip"}
+    )
 
 @app.post("/chat/{session_id}")
 async def chat(session_id: str, req: ChatRequest):
-    # Заглушка – можно подключить реальный AI
     return {
         "reply": f"Вы спросили: «{req.message}». К сожалению, ИИ-консультант пока недоступен, но вы можете изучить отчёт выше."
     }
