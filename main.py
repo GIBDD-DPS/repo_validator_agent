@@ -1,16 +1,18 @@
 """
-Repo Validator Agent — FastAPI сервис для анализа репозиториев (линтеры + автофиксы)
+Repo Validator Agent — FastAPI сервис (YandexGPT чат + линтеры + автофиксы)
 """
 import os
 import uuid
 import shutil
 import zipfile
 import io
+import json
 from typing import Dict, List, Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, HttpUrl
+import requests
 
 from core.repository_scanner import RepositoryScanner
 from core.project_analyzer import ProjectAnalyzer
@@ -102,7 +104,6 @@ def run_analysis(session_id: str, repo_url: str):
         session["report"] = report
         session["optimization_recommended"] = RECOMMENDED_TOOLS
         session["status"] = "done"
-        # Сохраняем копию файлов для возможности фиксов и скачивания
         session["files"] = files
     except Exception as e:
         session["status"] = "error"
@@ -121,6 +122,39 @@ def report_to_summary(report: dict) -> str:
             if issues:
                 lines.append(f"Линтеры ({f}):\n" + "\n".join(issues))
     return "\n\n".join(lines) or "Проблем не найдено"
+
+# ----- YANDEX GPT -----
+def query_yandex_gpt(api_key: str, prompt: str, context: str = "") -> str:
+    """Отправляет запрос в YandexGPT и возвращает ответ."""
+    url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+    headers = {
+        "Authorization": f"Api-Key {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "modelUri": "gpt://b1g3jdmevqk2s0n5e0t7/yandexgpt-lite",
+        "completionOptions": {
+            "stream": False,
+            "temperature": 0.6,
+            "maxTokens": 2000
+        },
+        "messages": [
+            {"role": "system", "text": "Ты — AI-консультант по анализу репозиториев. Отвечай кратко и по делу на русском языке."},
+            {"role": "user", "text": f"Контекст отчёта:\n{context}\n\nВопрос пользователя: {prompt}"}
+        ]
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        # Извлекаем текст ответа
+        alternatives = data.get("result", {}).get("alternatives", [])
+        if alternatives:
+            return alternatives[0].get("message", {}).get("text", "Нет ответа")
+        else:
+            return "Модель не вернула ответ."
+    except Exception as e:
+        return f"Ошибка при обращении к YandexGPT: {str(e)}"
 
 # ----- ЭНДПОИНТЫ -----
 
@@ -176,7 +210,6 @@ async def get_changes(session_id: str):
         "patch_summary": "Для применения автоматических исправлений нажмите «Применить автофиксы».",
     }
 
-# ----- НОВЫЙ /fix: запускает автофиксы и возвращает исправленный ZIP -----
 @app.post("/fix/{session_id}")
 async def apply_fixes(session_id: str):
     session = SESSIONS.get(session_id)
@@ -190,11 +223,9 @@ async def apply_fixes(session_id: str):
     if not files:
         raise HTTPException(500, "Нет файлов для обработки")
 
-    # Форматируем все Python-файлы
     new_files = engine.format_all(files)
-    session["fixed_files"] = new_files  # сохраняем для последующей загрузки
+    session["fixed_files"] = new_files
 
-    # Формируем ZIP с исправленным кодом
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for path, content in new_files.items():
@@ -230,11 +261,9 @@ async def download_repo(session_id: str):
     session = SESSIONS.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
-    # Отдаём исправленный ZIP, если он есть, иначе исходный
     if "fixed_files" in session:
         files = session["fixed_files"]
     else:
-        # Если фиксы не применялись, клонируем заново
         scanner = RepositoryScanner(session["repo_url"])
         scanner.clone()
         files = scanner.scan_repository()
@@ -252,9 +281,22 @@ async def download_repo(session_id: str):
 
 @app.post("/chat/{session_id}")
 async def chat(session_id: str, req: ChatRequest):
-    return {
-        "reply": f"Вы спросили: «{req.message}». К сожалению, ИИ-консультант пока недоступен, но вы можете изучить отчёт выше."
-    }
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Сессия не найдена")
+
+    # Получаем контекст из последнего отчёта
+    context = ""
+    if session.get("report"):
+        context = report_to_summary(session["report"])
+
+    # API-ключ из переменной окружения
+    api_key = os.getenv("YANDEX_API_KEY")
+    if not api_key:
+        return {"reply": "Ошибка: не настроен API-ключ YandexGPT. Добавьте переменную окружения YANDEX_API_KEY на сервере."}
+
+    reply = query_yandex_gpt(api_key, req.message, context)
+    return {"reply": reply}
 
 @app.on_event("shutdown")
 async def cleanup():
