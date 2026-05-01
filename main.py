@@ -132,7 +132,7 @@ def query_yandex_gpt(api_key: str, prompt: str, context: str = "") -> str:
         "Content-Type": "application/json"
     }
     payload = {
-        "modelUri": "gpt://b1g3jdmevqk2s0n5e0t7/yandexgpt-lite",
+        "modelUri": "gpt://b1gfhnp4aeamnaflt8g0/yandexgpt-lite",
         "completionOptions": {
             "stream": False,
             "temperature": 0.6,
