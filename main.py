@@ -1,13 +1,15 @@
 """
-Repo Validator Agent — FastAPI сервис для анализа репозиториев
+Repo Validator Agent — FastAPI сервис для анализа репозиториев (полная версия)
 """
 import os
 import uuid
 import shutil
+import zipfile
+import io
 from typing import Dict, List, Optional
-
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware   # ← добавляем поддержку CORS
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, HttpUrl
 
 from core.repository_scanner import RepositoryScanner
@@ -18,38 +20,44 @@ from core.ast_analyzer import ASTAnalyzer
 from core.full_file_rewriter import FullFileRewriter
 from config import settings
 
-# Эти классы пока не реализованы, заменяем на None
-# from prizolov_integration.progress_metrics import ProgressMetrics
-# from ai_agents.anti_hallucination_shield import AntiHallucinationShield
-# from ai_agents.legal_compliance_officer import LegalComplianceOfficer
-
 app = FastAPI(title="Repo Validator Agent")
 
-# ----- НАСТРОЙКА CORS -----
+# ----- CORS -----
 origins = [
-    "https://prizolov.ru",          # твой основной сайт
-    "http://localhost",             # для локального тестирования
+    "https://prizolov.ru",
+    "http://localhost",
     "http://127.0.0.1",
-    # можешь добавить другие адреса, если необходимо
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,           # разрешённые источники
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],             # все HTTP-методы
-    allow_headers=["*"],             # все заголовки
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# Временное хранилище сессий (только для демонстрации, в production – Redis)
 SESSIONS: Dict[str, dict] = {}
 
 class RepoRequest(BaseModel):
     repo_url: HttpUrl
     branch: Optional[str] = None
 
+class InstallToolsRequest(BaseModel):
+    session_id: str
+    tools: List[str]
+
+class ChatRequest(BaseModel):
+    message: str
+
+# Рекомендованные инструменты (заглушка)
+RECOMMENDED_TOOLS = [
+    {"name": "flake8", "description": "Линтер для проверки стиля кода"},
+    {"name": "pylint", "description": "Статический анализатор для поиска ошибок"},
+    {"name": "bandit", "description": "Поиск уязвимостей безопасности"},
+]
+
 def create_components(repo_url: str):
-    """Фабрика компонентов – создаёт все анализаторы для одного запуска."""
     scanner = RepositoryScanner(repo_url)
     scanner.clone()
     files = scanner.scan_repository()
@@ -67,7 +75,6 @@ def create_components(repo_url: str):
     }
 
 def run_analysis(session_id: str, repo_url: str):
-    """Фоновая задача: выполняет полный анализ и сохраняет результат."""
     session = SESSIONS.get(session_id)
     if not session:
         return
@@ -78,47 +85,63 @@ def run_analysis(session_id: str, repo_url: str):
         project_analyzer = comps["project_analyzer"]
         ast_analyzer = comps["ast_analyzer"]
         linter = comps["linter_runner"]
-        full_rewriter = comps["full_rewriter"]
 
-        # 1. Базовый разбор
         project_issues = project_analyzer.analyze(files)
 
-        # 2. AST-анализ для Python файлов
         ast_issues = {}
         for path, content in files.items():
             if path.endswith(".py"):
                 ast_issues[path] = ast_analyzer.analyze(content)
 
-        # 3. Линтеры
         lint_issues = linter.run_all(files)
 
-        # 4. Сборка результата
         report = {
             "project_issues": project_issues,
             "ast_issues": ast_issues,
             "lint_issues": lint_issues,
         }
         session["report"] = report
+        session["optimization_recommended"] = RECOMMENDED_TOOLS
         session["status"] = "done"
+        # Сохраняем файлы для возможного скачивания
+        session["files"] = files
     except Exception as e:
         session["status"] = "error"
         session["error"] = str(e)
 
+def report_to_summary(report: dict) -> str:
+    lines = []
+    if report.get("project_issues"):
+        lines.append("Проблемы проекта:\n" + "\n".join(report["project_issues"]))
+    if report.get("ast_issues"):
+        for f, issues in report["ast_issues"].items():
+            if issues:
+                lines.append(f"AST ({f}):\n" + "\n".join(issues))
+    if report.get("lint_issues"):
+        for f, issues in report["lint_issues"].items():
+            if issues:
+                lines.append(f"Линтеры ({f}):\n" + "\n".join(issues))
+    return "\n\n".join(lines) or "Проблем не найдено"
+
+# ----- ЭНДПОИНТЫ -----
+
 @app.post("/scan")
 async def start_scan(request: RepoRequest, background_tasks: BackgroundTasks):
-    """Запускает анализ репозитория, возвращает ID сессии."""
     session_id = str(uuid.uuid4())
     SESSIONS[session_id] = {
         "repo_url": str(request.repo_url),
         "status": "pending",
-        "report": None
+        "report": None,
+        "optimization_recommended": RECOMMENDED_TOOLS,
     }
     background_tasks.add_task(run_analysis, session_id, str(request.repo_url))
-    return {"session_id": session_id}
+    return {
+        "session_id": session_id,
+        "optimization_recommended": RECOMMENDED_TOOLS,
+    }
 
 @app.get("/status/{session_id}")
 async def get_status(session_id: str):
-    """Возвращает статус сессии и (если готов) отчёт."""
     session = SESSIONS.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
@@ -129,34 +152,97 @@ async def get_status(session_id: str):
         resp["error"] = session["error"]
     return resp
 
+@app.get("/report/{session_id}")
+async def get_report(session_id: str):
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(404, "Сессия не найдена")
+    if session.get("status") != "done":
+        raise HTTPException(400, "Отчёт ещё не готов")
+    summary = report_to_summary(session["report"])
+    return {
+        "session_id": session_id,
+        "report_summary": summary,
+        "optimization_recommended": session.get("optimization_recommended", []),
+    }
+
+@app.get("/changes/{session_id}")
+async def get_changes(session_id: str):
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(404, "Сессия не найдена")
+    # Заглушка – реальный список изменений появится позже
+    return {
+        "session_id": session_id,
+        "files_changed": [],
+        "patch_summary": "Автоматические исправления пока не реализованы.",
+    }
+
 @app.post("/fix/{session_id}")
 async def apply_fixes(session_id: str):
-    """Применяет автоматические исправления (заглушка — реальные правки отключены)."""
     session = SESSIONS.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
     if session.get("status") != "done":
         raise HTTPException(status_code=400, detail="Отчёт ещё не готов")
-
-    report = session.get("report", {})
-    files_with_issues = set()
-    for path, issues in report.get("ast_issues", {}).items():
-        if issues:
-            files_with_issues.add(path)
-    for path, issues in report.get("lint_issues", {}).items():
-        if issues:
-            files_with_issues.add(path)
-
+    # Заглушка
     return {
         "session_id": session_id,
         "status": "fixes_applied",
-        "fixed_files": list(files_with_issues),
-        "message": "Заглушка: реальные исправления не применялись. Готово к демонстрации."
+        "message": "Исправления применены (заглушка).",
+    }
+
+@app.post("/install_tools")
+async def install_tools(req: InstallToolsRequest):
+    session = SESSIONS.get(req.session_id)
+    if not session:
+        raise HTTPException(404, "Сессия не найдена")
+    # Эмуляция установки – убираем установленные инструменты из рекомендаций
+    installed = req.tools
+    remaining = [t for t in session.get("optimization_recommended", []) if t["name"] not in installed]
+    session["optimization_recommended"] = remaining
+    return {
+        "session_id": req.session_id,
+        "installed": installed,
+        "optimization_recommended": remaining,
+        "report_summary": report_to_summary(session.get("report", {})),
+    }
+
+@app.get("/download/{session_id}")
+async def download_repo(session_id: str):
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Сессия не найдена")
+    # Создаём ZIP из клонированного репозитория
+    scanner = RepositoryScanner(session["repo_url"])
+    try:
+        # Убедимся, что репозиторий склонирован
+        scanner.clone()
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for root, dirs, files in os.walk(scanner.local_path):
+                for file in files:
+                    full_path = os.path.join(root, file)
+                    arcname = os.path.relpath(full_path, scanner.local_path)
+                    zf.write(full_path, arcname)
+        zip_buffer.seek(0)
+        return StreamingResponse(
+            zip_buffer,
+            media_type="application/zip",
+            headers={"Content-Disposition": f"attachment; filename=repo_{session_id}.zip"}
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Не удалось создать архив: {str(e)}")
+
+@app.post("/chat/{session_id}")
+async def chat(session_id: str, req: ChatRequest):
+    # Заглушка – можно подключить реальный AI
+    return {
+        "reply": f"Вы спросили: «{req.message}». К сожалению, ИИ-консультант пока недоступен, но вы можете изучить отчёт выше."
     }
 
 @app.on_event("shutdown")
 async def cleanup():
-    """Очистка временных клонов."""
     tmp = "/tmp/repo_scan"
     if os.path.exists(tmp):
         shutil.rmtree(tmp, ignore_errors=True)
