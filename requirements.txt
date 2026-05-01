@@ -4,5 +4,6 @@ pydantic
 chardet
 requests
 flake8
-pylint
 bandit
+black
+isort
