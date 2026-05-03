@@ -2,7 +2,6 @@ import requests
 import zipfile
 import io
 import os
-import shutil
 from typing import List, Dict
 
 class MarketInstaller:
@@ -17,15 +16,12 @@ class MarketInstaller:
         results = {}
         for name in tool_names:
             try:
-                # Получаем информацию о пакете с маркета
                 info = self._get_tool_info(name)
                 if not info:
                     results[name] = False
                     continue
-                # Скачиваем архив
                 resp = requests.get(info["download_url"], timeout=30)
                 resp.raise_for_status()
-                # Распаковываем в целевую папку
                 with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
                     zf.extractall(self.target_dir)
                 results[name] = True
@@ -35,9 +31,7 @@ class MarketInstaller:
         return results
 
     def _get_tool_info(self, name: str) -> dict:
-        """Возвращает словарь с ключами 'download_url', 'version' и т.д.
-           В реальной версии — запрос к API маркета."""
-        # Заглушка: имитируем ответ маркета
+        # Заглушка – в реальности запрос к API маркета
         fake_db = {
             "prizolov-optimizer": {
                 "download_url": "https://market.prizolov.ru/tools/optimizer.zip",
