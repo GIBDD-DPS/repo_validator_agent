@@ -1,5 +1,5 @@
 """
-Repo Validator Agent — FastAPI сервис (YandexGPT чат + линтеры + автофиксы)
+Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, авторские права)
 """
 import os
 import uuid
@@ -20,6 +20,7 @@ from core.fix_engine import StepFixEngine
 from core.linter_runner import LinterRunner
 from core.ast_analyzer import ASTAnalyzer
 from core.full_file_rewriter import FullFileRewriter
+from core.copyright_manager import CopyrightManager
 from config import settings
 
 app = FastAPI(title="Repo Validator Agent")
@@ -51,6 +52,11 @@ class InstallToolsRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+
+class CopyrightApplyRequest(BaseModel):
+    author: Optional[str] = None
+    company: Optional[str] = None
+    replace_existing: bool = False
 
 RECOMMENDED_TOOLS = [
     {"name": "prizolov-optimizer", "description": "Автоматическая оптимизация кода"},
@@ -125,14 +131,13 @@ def report_to_summary(report: dict) -> str:
 
 # ----- YANDEX GPT -----
 def query_yandex_gpt(api_key: str, prompt: str, context: str = "") -> str:
-    """Отправляет запрос в YandexGPT и возвращает ответ."""
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
     headers = {
         "Authorization": f"Api-Key {api_key}",
         "Content-Type": "application/json"
     }
     payload = {
-        "modelUri": "gpt://b1gfhnp4aeamnaflt8g0/yandexgpt-lite",
+        "modelUri": f"gpt://{os.getenv('YANDEX_FOLDER_ID', 'b1g3jdmevqk2s0n5e0t7')}/yandexgpt-lite",
         "completionOptions": {
             "stream": False,
             "temperature": 0.6,
@@ -147,7 +152,6 @@ def query_yandex_gpt(api_key: str, prompt: str, context: str = "") -> str:
         resp = requests.post(url, headers=headers, json=payload, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-        # Извлекаем текст ответа
         alternatives = data.get("result", {}).get("alternatives", [])
         if alternatives:
             return alternatives[0].get("message", {}).get("text", "Нет ответа")
@@ -224,7 +228,7 @@ async def apply_fixes(session_id: str):
         raise HTTPException(500, "Нет файлов для обработки")
 
     new_files = engine.format_all(files)
-    session["fixed_files"] = new_files
+    session["fixed_files"] = new_files   # для скачивания ZIP
 
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -261,9 +265,9 @@ async def download_repo(session_id: str):
     session = SESSIONS.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
-    if "fixed_files" in session:
-        files = session["fixed_files"]
-    else:
+    # Отдаём исправленные файлы (после автофиксов или копирайта), если они есть
+    files = session.get("fixed_files") or session.get("files", {})
+    if not files:
         scanner = RepositoryScanner(session["repo_url"])
         scanner.clone()
         files = scanner.scan_repository()
@@ -279,18 +283,50 @@ async def download_repo(session_id: str):
         headers={"Content-Disposition": f"attachment; filename=repo_{session_id}.zip"}
     )
 
+# ----- НОВЫЕ ЭНДПОИНТЫ АВТОРСКИХ ПРАВ -----
+@app.get("/copyright/{session_id}")
+async def check_copyright(session_id: str):
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(404, "Сессия не найдена")
+    mgr = CopyrightManager()
+    files = session.get("files") or session.get("fixed_files", {})
+    found = mgr.check_copyright(files)
+    return {"session_id": session_id, "copyrights": found}
+
+@app.post("/copyright/{session_id}")
+async def apply_copyright(session_id: str, req: CopyrightApplyRequest):
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(404, "Сессия не найдена")
+    mgr = CopyrightManager()
+    # Берем текущие файлы (оригинальные или уже после исправлений)
+    files = session.get("fixed_files") or session.get("files", {})
+    if not files:
+        raise HTTPException(400, "Нет файлов для обработки")
+    new_files = mgr.apply_copyright(
+        files,
+        author=req.author,
+        company=req.company,
+        replace_existing=req.replace_existing
+    )
+    session["fixed_files"] = new_files  # обновляем, чтобы скачать потом
+    return {
+        "session_id": session_id,
+        "status": "applied",
+        "message": "Авторские права добавлены/заменены."
+    }
+
 @app.post("/chat/{session_id}")
 async def chat(session_id: str, req: ChatRequest):
     session = SESSIONS.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
 
-    # Получаем контекст из последнего отчёта
     context = ""
     if session.get("report"):
         context = report_to_summary(session["report"])
 
-    # API-ключ из переменной окружения
     api_key = os.getenv("YANDEX_API_KEY")
     if not api_key:
         return {"reply": "Ошибка: не настроен API-ключ YandexGPT. Добавьте переменную окружения YANDEX_API_KEY на сервере."}
