@@ -25,7 +25,6 @@ from config import settings
 
 app = FastAPI(title="Repo Validator Agent")
 
-# ----- CORS -----
 origins = [
     "https://prizolov.ru",
     "http://localhost",
@@ -54,7 +53,10 @@ class ChatRequest(BaseModel):
     message: str
 
 class CopyrightApplyRequest(BaseModel):
-    copyright_text: str
+    copyright_text: Optional[str] = None
+    author: Optional[str] = None
+    organization: Optional[str] = None
+    product: Optional[str] = None
 
 RECOMMENDED_TOOLS = [
     {"name": "prizolov-optimizer", "description": "Автоматическая оптимизация кода"},
@@ -159,7 +161,6 @@ def query_yandex_gpt(api_key: str, prompt: str, context: str = "") -> str:
         return f"Ошибка при обращении к YandexGPT: {str(e)}"
 
 # ----- ЭНДПОИНТЫ -----
-
 @app.post("/scan")
 async def start_scan(request: RepoRequest, background_tasks: BackgroundTasks):
     session_id = str(uuid.uuid4())
@@ -170,10 +171,7 @@ async def start_scan(request: RepoRequest, background_tasks: BackgroundTasks):
         "optimization_recommended": RECOMMENDED_TOOLS,
     }
     background_tasks.add_task(run_analysis, session_id, str(request.repo_url))
-    return {
-        "session_id": session_id,
-        "optimization_recommended": RECOMMENDED_TOOLS,
-    }
+    return {"session_id": session_id, "optimization_recommended": RECOMMENDED_TOOLS}
 
 @app.get("/status/{session_id}")
 async def get_status(session_id: str):
@@ -219,21 +217,17 @@ async def apply_fixes(session_id: str):
         raise HTTPException(status_code=404, detail="Сессия не найдена")
     if session.get("status") != "done":
         raise HTTPException(status_code=400, detail="Отчёт ещё не готов")
-
     engine = StepFixEngine()
     files = session.get("files", {})
     if not files:
         raise HTTPException(500, "Нет файлов для обработки")
-
     new_files = engine.format_all(files)
     session["fixed_files"] = new_files
-
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for path, content in new_files.items():
             zf.writestr(path, content)
     zip_buffer.seek(0)
-
     return StreamingResponse(
         zip_buffer,
         media_type="application/zip",
@@ -268,7 +262,6 @@ async def download_repo(session_id: str):
         scanner = RepositoryScanner(session["repo_url"])
         scanner.clone()
         files = scanner.scan_repository()
-
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for path, content in files.items():
@@ -280,7 +273,6 @@ async def download_repo(session_id: str):
         headers={"Content-Disposition": f"attachment; filename=repo_{session_id}.zip"}
     )
 
-# ----- НОВЫЕ ЭНДПОИНТЫ АВТОРСКИХ ПРАВ -----
 @app.get("/copyright/{session_id}")
 async def check_copyright(session_id: str):
     session = SESSIONS.get(session_id)
@@ -303,29 +295,25 @@ async def apply_copyright(session_id: str, req: CopyrightApplyRequest):
     new_files = mgr.apply_copyright(
         files,
         copyright_text=req.copyright_text,
-        skip_existing=True   # не трогаем чужие копирайты
+        author=req.author,
+        organization=req.organization,
+        product=req.product,
+        skip_existing=True
     )
     session["fixed_files"] = new_files
-    return {
-        "session_id": session_id,
-        "status": "applied",
-        "message": f"Авторские права '{req.copyright_text}' добавлены в файлы без копирайта."
-    }
+    return {"session_id": session_id, "status": "applied", "message": "Авторские права добавлены."}
 
 @app.post("/chat/{session_id}")
 async def chat(session_id: str, req: ChatRequest):
     session = SESSIONS.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
-
     context = ""
     if session.get("report"):
         context = report_to_summary(session["report"])
-
     api_key = os.getenv("YANDEX_API_KEY")
     if not api_key:
-        return {"reply": "Ошибка: не настроен API-ключ YandexGPT. Добавьте переменную окружения YANDEX_API_KEY на сервере."}
-
+        return {"reply": "Ошибка: не настроен API-ключ YandexGPT."}
     reply = query_yandex_gpt(api_key, req.message, context)
     return {"reply": reply}
 
