@@ -54,9 +54,7 @@ class ChatRequest(BaseModel):
     message: str
 
 class CopyrightApplyRequest(BaseModel):
-    author: Optional[str] = None
-    company: Optional[str] = None
-    replace_existing: bool = False
+    copyright_text: str
 
 RECOMMENDED_TOOLS = [
     {"name": "prizolov-optimizer", "description": "Автоматическая оптимизация кода"},
@@ -228,7 +226,7 @@ async def apply_fixes(session_id: str):
         raise HTTPException(500, "Нет файлов для обработки")
 
     new_files = engine.format_all(files)
-    session["fixed_files"] = new_files   # для скачивания ZIP
+    session["fixed_files"] = new_files
 
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -265,7 +263,6 @@ async def download_repo(session_id: str):
     session = SESSIONS.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
-    # Отдаём исправленные файлы (после автофиксов или копирайта), если они есть
     files = session.get("fixed_files") or session.get("files", {})
     if not files:
         scanner = RepositoryScanner(session["repo_url"])
@@ -300,21 +297,19 @@ async def apply_copyright(session_id: str, req: CopyrightApplyRequest):
     if not session:
         raise HTTPException(404, "Сессия не найдена")
     mgr = CopyrightManager()
-    # Берем текущие файлы (оригинальные или уже после исправлений)
     files = session.get("fixed_files") or session.get("files", {})
     if not files:
         raise HTTPException(400, "Нет файлов для обработки")
     new_files = mgr.apply_copyright(
         files,
-        author=req.author,
-        company=req.company,
-        replace_existing=req.replace_existing
+        copyright_text=req.copyright_text,
+        skip_existing=True   # не трогаем чужие копирайты
     )
-    session["fixed_files"] = new_files  # обновляем, чтобы скачать потом
+    session["fixed_files"] = new_files
     return {
         "session_id": session_id,
         "status": "applied",
-        "message": "Авторские права добавлены/заменены."
+        "message": f"Авторские права '{req.copyright_text}' добавлены в файлы без копирайта."
     }
 
 @app.post("/chat/{session_id}")
