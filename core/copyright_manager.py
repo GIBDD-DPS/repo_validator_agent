@@ -58,14 +58,14 @@ class CopyrightManager:
     """Ищет, добавляет или заменяет комментарии с авторскими правами."""
 
     COMMENT_PATTERNS = [
-        re.compile(r'^\s*#\s*Copyright\s*(.*)', re.IGNORECASE),          # Python, YAML etc.
-        re.compile(r'^\s*//\s*Copyright\s*(.*)', re.IGNORECASE),         # JS, TS, Java, C#
-        re.compile(r'^\s*/\*\s*Copyright\s*(.*?)\*/', re.IGNORECASE),   # CSS/многострочный открытый
-        re.compile(r'^\s*<!--\s*Copyright\s*(.*?)-->', re.IGNORECASE),  # HTML, MD
-        re.compile(r'^\s*REM\s*Copyright\s*(.*)', re.IGNORECASE),       # Batch
-        re.compile(r'^\s*\"\s*Copyright\s*(.*)', re.IGNORECASE),        # Vim
-        re.compile(r'^\s*--\s*Copyright\s*(.*)', re.IGNORECASE),        # SQL, Lua
-        re.compile(r'^\s*%\s*Copyright\s*(.*)', re.IGNORECASE),         # Erlang, Matlab (редко)
+        re.compile(r'^\s*#\s*Copyright\s*(.*)', re.IGNORECASE),
+        re.compile(r'^\s*//\s*Copyright\s*(.*)', re.IGNORECASE),
+        re.compile(r'^\s*/\*\s*Copyright\s*(.*?)\*/', re.IGNORECASE),
+        re.compile(r'^\s*<!--\s*Copyright\s*(.*?)-->', re.IGNORECASE),
+        re.compile(r'^\s*REM\s*Copyright\s*(.*)', re.IGNORECASE),
+        re.compile(r'^\s*\"\s*Copyright\s*(.*)', re.IGNORECASE),
+        re.compile(r'^\s*--\s*Copyright\s*(.*)', re.IGNORECASE),
+        re.compile(r'^\s*%\s*Copyright\s*(.*)', re.IGNORECASE),
     ]
 
     def check_copyright(self, files: Dict[str, str]) -> List[Dict[str, str]]:
@@ -73,12 +73,11 @@ class CopyrightManager:
         Возвращает список уникальных найденных копирайтов с их исходным текстом и файлами.
         Каждый элемент: {"text": "Copyright ...", "files": ["file1.py", ...]}
         """
-        found = {}  # текст -> список файлов
+        found = {}
         for path, content in files.items():
             first_line = content.split('\n')[0].strip() if content else ''
             if not first_line:
                 continue
-            # Попробуем сопоставить с образцами
             for pattern in self.COMMENT_PATTERNS:
                 match = pattern.match(first_line)
                 if match:
@@ -87,70 +86,61 @@ class CopyrightManager:
                         found[copyright_text] = []
                     found[copyright_text].append(path)
                     break
-        # Формируем список
         result = []
         for text, file_list in found.items():
-            result.append({"text": text, "files": file_list[:5]})  # первые 5 для отображения
+            result.append({"text": text, "files": file_list[:5]})
         return result
 
     def apply_copyright(self,
                         files: Dict[str, str],
-                        author: Optional[str] = None,
-                        company: Optional[str] = None,
-                        replace_existing: bool = False) -> Dict[str, str]:
+                        copyright_text: str,
+                        skip_existing: bool = True) -> Dict[str, str]:
         """
-        Добавляет или заменяет copyright во всех текстовых файлах.
+        Добавляет copyright_text в начало файлов, в которых ещё нет никакого копирайта.
+        Если skip_existing=True (по умолчанию), файлы с уже существующим копирайтом не изменяются.
         Возвращает обновлённый словарь {путь: содержимое}.
         """
-        year = "2026"  # можно автоматизировать через datetime
-        # Формируем текст копирайта
-        if company and author:
-            copyright_line = f"Copyright (c) {year} {author}, {company}"
-        elif company:
-            copyright_line = f"Copyright (c) {year} {company}"
-        elif author:
-            copyright_line = f"Copyright (c) {year} {author}"
-        else:
-            copyright_line = f"Copyright (c) {year}"
-
         new_files = {}
         for path, content in files.items():
             ext = os.path.splitext(path)[1].lower()
             base = os.path.basename(path).lower()
             if ext not in TEXT_EXTENSIONS and base not in TEXT_EXTENSIONS:
-                new_files[path] = content  # не модифицируем бинарные/неизвестные
+                new_files[path] = content
                 continue
 
-            comment_char = TEXT_EXTENSIONS.get(ext) or TEXT_EXTENSIONS.get(base, '#')
-            # Формируем шапку
-            if comment_char == '#':
-                header = f"# {copyright_line}\n"
-            elif comment_char == '//':
-                header = f"// {copyright_line}\n"
-            elif comment_char.startswith('/*'):
-                header = f"/* {copyright_line} */\n"
-            elif comment_char == '<!--':
-                header = f"<!-- {copyright_line} -->\n"
-            elif comment_char.upper() == 'REM':
-                header = f"REM {copyright_line}\n"
-            elif comment_char == '"':
-                header = f'" {copyright_line}\n'
-            elif comment_char == '--':
-                header = f"-- {copyright_line}\n"
-            else:
-                header = f"# {copyright_line}\n"
+            # Проверяем, есть ли уже копирайт
+            first_line = (content.split('\n')[0].strip()) if content else ''
+            has_copyright = any(p.match(first_line) for p in self.COMMENT_PATTERNS)
+            if skip_existing and has_copyright:
+                # Не трогаем файлы с существующим копирайтом
+                new_files[path] = content
+                continue
 
-            # Удаляем старый копирайт в первой строке, если нужно заменить
-            if replace_existing:
+            # Определяем символ комментария
+            comment_char = TEXT_EXTENSIONS.get(ext) or TEXT_EXTENSIONS.get(base, '#')
+            if comment_char == '#':
+                header = f"# {copyright_text}\n"
+            elif comment_char == '//':
+                header = f"// {copyright_text}\n"
+            elif comment_char.startswith('/*'):
+                header = f"/* {copyright_text} */\n"
+            elif comment_char == '<!--':
+                header = f"<!-- {copyright_text} -->\n"
+            elif comment_char.upper() == 'REM':
+                header = f"REM {copyright_text}\n"
+            elif comment_char == '"':
+                header = f'" {copyright_text}\n'
+            elif comment_char == '--':
+                header = f"-- {copyright_text}\n"
+            else:
+                header = f"# {copyright_text}\n"
+
+            # Если ранее был копирайт и skip_existing=False, то удаляем первую строку
+            if not skip_existing and has_copyright:
                 lines = content.splitlines(keepends=True)
                 if lines:
-                    first = lines[0].strip()
-                    is_copyright = any(p.match(first) for p in self.COMMENT_PATTERNS)
-                    if is_copyright:
-                        lines = lines[1:]  # удаляем первую строку
+                    lines = lines[1:]
                 content = ''.join(lines)
-
-            # Вставляем шапку в начало
             new_content = header + content
             new_files[path] = new_content
 
