@@ -130,7 +130,7 @@ def query_yandex_gpt(prompt: str, context: str = "", max_tokens: int = 2000) -> 
     api_key = os.getenv("YANDEX_API_KEY")
     if not api_key:
         return "Ошибка: не настроен YANDEX_API_KEY"
-    folder_id = os.getenv("YANDEX_FOLDER_ID", "b1g3jdmevqk2s0n5e0t7")  # замените на свой
+    folder_id = os.getenv("YANDEX_FOLDER_ID", "b1gfhnp4aeamnaflt8g0")  # замените на свой
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
     headers = {
         "Authorization": f"Api-Key {api_key}",
