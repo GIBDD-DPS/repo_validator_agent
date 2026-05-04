@@ -136,6 +136,11 @@ def query_yandex_gpt(prompt: str, context: str = "", max_tokens: int = 2000) -> 
         "Authorization": f"Api-Key {api_key}",
         "Content-Type": "application/json"
     }
+    # --- Ограничиваем размер контекста, чтобы избежать 400 ошибки ---
+    max_context_len = 3000  # символов, примерно 700-800 токенов
+    if len(context) > max_context_len:
+        context = context[:max_context_len] + "\n... (контекст обрезан)"
+    # ----------------------------------------------------------------
     payload = {
         "modelUri": f"gpt://{folder_id}/yandexgpt-lite",
         "completionOptions": {
