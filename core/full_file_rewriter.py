@@ -1,3 +1,10 @@
+# ============================================
+# Copyright (c) 2026
+# Prizolov Agent OS v3.023
+# Author: Dm.Andreyanov
+# Organization: Prizolov Market / Prizolov Lab
+# ============================================
+
 """
 Full file rewriter: применяет исправления «псевдо‑Black» к целым файлам.
 Временно отключено, чтобы избежать случайной порчи не-Python файлов.
