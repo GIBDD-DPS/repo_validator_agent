@@ -6,7 +6,7 @@
 # ============================================
 
 """
-Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR, Пятиуровневый аудит, Цифровой совет директоров)
+Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR, Пятиуровневый аудит, Цифровой совет директоров, Центр техдолга)
 """
 import os
 import uuid
@@ -51,6 +51,13 @@ app.add_middleware(
 
 SESSIONS: Dict[str, dict] = {}
 
+# Глобальные накопления (в памяти, сбрасываются при перезапуске)
+SAVINGS = {
+    "fixed": 0,   # устранено проблем
+    "hours": 0.0, # сэкономлено часов
+    "money": 0.0  # сэкономлено денег
+}
+
 class RepoRequest(BaseModel):
     repo_url: HttpUrl
     branch: Optional[str] = None
@@ -60,7 +67,7 @@ class ChatRequest(BaseModel):
 
 class AdvisorChatRequest(BaseModel):
     message: str
-    role: str  # analyst, architect, security, treasurer
+    role: str
 
 class CopyrightApplyRequest(BaseModel):
     copyright_text: Optional[str] = None
@@ -72,6 +79,12 @@ class CreatePRRequest(BaseModel):
     github_token: str
     title: Optional[str] = "Repo Validator automatic fixes"
     base_branch: Optional[str] = "main"
+
+# Модель для обновления накоплений
+class SavingsUpdateRequest(BaseModel):
+    fixed: int = 0
+    hours: float = 0.0
+    money: float = 0.0
 
 def create_components(repo_url: str):
     scanner = RepositoryScanner(repo_url)
@@ -102,7 +115,6 @@ def run_analysis(session_id: str, repo_url: str):
         ast_analyzer = comps["ast_analyzer"]
         linter = comps["linter_runner"]
 
-        # Уровень 1: Гигиена кода
         project_issues = project_analyzer.analyze(files)
 
         ast_issues = {}
@@ -118,7 +130,6 @@ def run_analysis(session_id: str, repo_url: str):
             "lint_issues": lint_issues,
         }
 
-        # Пятиуровневый аудит
         auditor = PrizolovAuditor()
         audit_results = auditor.audit(files)
         serialized_audit = {}
@@ -386,9 +397,7 @@ async def chat_advisor(session_id: str, req: AdvisorChatRequest):
     if session.get("report"):
         context = report_to_summary(session["report"])
 
-    # Выбираем системный промпт по роли
     system_prompt = ROLE_PROMPTS.get(req.role, ROLE_PROMPTS["analyst"])
-    # Формируем полный запрос
     prompt = f"{system_prompt}\n\nКонтекст отчёта:\n{context}\n\nВопрос пользователя: {req.message}"
 
     api_key = os.getenv("YANDEX_API_KEY")
@@ -400,10 +409,8 @@ async def chat_advisor(session_id: str, req: AdvisorChatRequest):
         "Authorization": f"Api-Key {api_key}",
         "Content-Type": "application/json"
     }
-    # Ограничиваем общий размер контекста
     max_context_len = 2500
     if len(prompt) > max_context_len:
-        # Оставляем системный промпт и обрезаем контекст
         prompt = f"{system_prompt}\n\nКонтекст отчёта (сокращён):\n{context[:max_context_len - len(system_prompt) - 50]}...\n\nВопрос пользователя: {req.message}"
 
     payload = {
@@ -430,7 +437,7 @@ async def chat_advisor(session_id: str, req: AdvisorChatRequest):
     except Exception as e:
         return {"reply": f"Ошибка при обращении к YandexGPT: {str(e)}"}
 
-# ----- ОБЫЧНЫЙ ЧАТ (оставлен для совместимости) -----
+# ----- ОБЫЧНЫЙ ЧАТ -----
 @app.post("/chat/{session_id}")
 async def chat(session_id: str, req: ChatRequest):
     session = SESSIONS.get(session_id)
@@ -464,6 +471,18 @@ async def download_repo(session_id: str):
         media_type="application/zip",
         headers={"Content-Disposition": f"attachment; filename=repo_{session_id}.zip"}
     )
+
+# ===== ГЛОБАЛЬНЫЕ НАКОПЛЕНИЯ =====
+@app.get("/savings")
+async def get_savings():
+    return SAVINGS
+
+@app.post("/savings/update")
+async def update_savings(req: SavingsUpdateRequest):
+    SAVINGS["fixed"] += req.fixed
+    SAVINGS["hours"] += req.hours
+    SAVINGS["money"] += req.money
+    return SAVINGS
 
 @app.on_event("shutdown")
 async def cleanup():
