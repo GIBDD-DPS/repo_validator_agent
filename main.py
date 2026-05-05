@@ -4,8 +4,9 @@
 # Author: Dm.Andreyanov
 # Organization: Prizolov Market / Prizolov Lab
 # ============================================
+
 """
-Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR)
+Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR, Пятиуровневый аудит)
 """
 import os
 import uuid
@@ -28,6 +29,7 @@ from core.ast_analyzer import ASTAnalyzer
 from core.full_file_rewriter import FullFileRewriter
 from core.copyright_manager import CopyrightManager
 from core.github_integration import GitHubIntegration
+from core.prizolov_audit import PrizolovAuditor
 from config import settings
 
 app = FastAPI(title="Repo Validator Agent")
@@ -96,6 +98,7 @@ def run_analysis(session_id: str, repo_url: str):
         ast_analyzer = comps["ast_analyzer"]
         linter = comps["linter_runner"]
 
+        # Уровень 1: Гигиена кода (уже есть)
         project_issues = project_analyzer.analyze(files)
 
         ast_issues = {}
@@ -110,6 +113,18 @@ def run_analysis(session_id: str, repo_url: str):
             "ast_issues": ast_issues,
             "lint_issues": lint_issues,
         }
+
+        # Новый пятиуровневый аудит
+        auditor = PrizolovAuditor()
+        audit_results = auditor.audit(files)
+        serialized_audit = {}
+        for level, issues in audit_results.items():
+            serialized_audit[level] = [
+                f"[{i.criticality.upper()}] {i.file}:{i.line} - {i.message}"
+                for i in issues
+            ]
+        report["audit"] = serialized_audit
+
         session["report"] = report
         session["status"] = "done"
         session["files"] = files
@@ -129,6 +144,16 @@ def report_to_summary(report: dict) -> str:
         for f, issues in report["lint_issues"].items():
             if issues:
                 lines.append(f"Линтеры ({f}):\n" + "\n".join(issues))
+    if report.get("audit"):
+        level_names = {
+            "architecture": "Архитектура",
+            "security": "Безопасность",
+            "performance": "Производительность",
+            "documentation": "Документированность"
+        }
+        for level, issues in report["audit"].items():
+            if issues:
+                lines.append(f"Аудит {level_names.get(level, level)}:\n" + "\n".join(issues))
     return "\n\n".join(lines) or "Проблем не найдено"
 
 # ----- YANDEX GPT HELPER (для чата и рекомендаций) -----
@@ -136,17 +161,15 @@ def query_yandex_gpt(prompt: str, context: str = "", max_tokens: int = 2000) -> 
     api_key = os.getenv("YANDEX_API_KEY")
     if not api_key:
         return "Ошибка: не настроен YANDEX_API_KEY"
-    folder_id = os.getenv("YANDEX_FOLDER_ID", "b1gfhnp4aeamnaflt8g0")  # замените на свой
+    folder_id = os.getenv("YANDEX_FOLDER_ID", "b1gfhnp4aeamnaflt8g0")  # ← ВАШ ID КАТАЛОГА
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
     headers = {
         "Authorization": f"Api-Key {api_key}",
         "Content-Type": "application/json"
     }
-    # --- Ограничиваем размер контекста, чтобы избежать 400 ошибки ---
-    max_context_len = 3000  # символов, примерно 700-800 токенов
+    max_context_len = 3000
     if len(context) > max_context_len:
         context = context[:max_context_len] + "\n... (контекст обрезан)"
-    # ----------------------------------------------------------------
     payload = {
         "modelUri": f"gpt://{folder_id}/yandexgpt-lite",
         "completionOptions": {
@@ -274,6 +297,9 @@ async def get_recommendations(session_id: str):
     for file, issues in report.get("lint_issues", {}).items():
         for i in issues:
             all_issues.append(f"Линтер ({file}): {i}")
+    for level, issues in report.get("audit", {}).items():
+        for i in issues:
+            all_issues.append(f"Аудит ({level}): {i}")
 
     if not all_issues:
         return {"recommendations": "Ошибок нет"}
