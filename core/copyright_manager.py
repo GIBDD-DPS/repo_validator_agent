@@ -1,3 +1,10 @@
+# ============================================
+# Copyright (c) 2026
+# Prizolov Agent OS v3.023
+# Author: Dm.Andreyanov
+# Organization: Prizolov Market / Prizolov Lab
+# ============================================
+
 import os
 import re
 from typing import Dict, List, Optional
