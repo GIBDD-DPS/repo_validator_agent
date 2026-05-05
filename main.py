@@ -1,3 +1,9 @@
+# ============================================
+# Copyright (c) 2026
+# Prizolov Agent OS v3.023
+# Author: Dm.Andreyanov
+# Organization: Prizolov Market / Prizolov Lab
+# ============================================
 """
 Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR)
 """
