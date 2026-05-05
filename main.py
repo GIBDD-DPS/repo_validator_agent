@@ -6,7 +6,7 @@
 # ============================================
 
 """
-Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR, Пятиуровневый аудит)
+Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR, Пятиуровневый аудит, Цифровой совет директоров)
 """
 import os
 import uuid
@@ -58,6 +58,10 @@ class RepoRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str
 
+class AdvisorChatRequest(BaseModel):
+    message: str
+    role: str  # analyst, architect, security, treasurer
+
 class CopyrightApplyRequest(BaseModel):
     copyright_text: Optional[str] = None
     author: Optional[str] = None
@@ -98,7 +102,7 @@ def run_analysis(session_id: str, repo_url: str):
         ast_analyzer = comps["ast_analyzer"]
         linter = comps["linter_runner"]
 
-        # Уровень 1: Гигиена кода (уже есть)
+        # Уровень 1: Гигиена кода
         project_issues = project_analyzer.analyze(files)
 
         ast_issues = {}
@@ -114,7 +118,7 @@ def run_analysis(session_id: str, repo_url: str):
             "lint_issues": lint_issues,
         }
 
-        # Новый пятиуровневый аудит
+        # Пятиуровневый аудит
         auditor = PrizolovAuditor()
         audit_results = auditor.audit(files)
         serialized_audit = {}
@@ -156,12 +160,12 @@ def report_to_summary(report: dict) -> str:
                 lines.append(f"Аудит {level_names.get(level, level)}:\n" + "\n".join(issues))
     return "\n\n".join(lines) or "Проблем не найдено"
 
-# ----- YANDEX GPT HELPER (для чата и рекомендаций) -----
+# ----- YANDEX GPT HELPER -----
 def query_yandex_gpt(prompt: str, context: str = "", max_tokens: int = 2000) -> str:
     api_key = os.getenv("YANDEX_API_KEY")
     if not api_key:
         return "Ошибка: не настроен YANDEX_API_KEY"
-    folder_id = os.getenv("YANDEX_FOLDER_ID", "b1gfhnp4aeamnaflt8g0")  # ← ВАШ ID КАТАЛОГА
+    folder_id = os.getenv("YANDEX_FOLDER_ID", "b1gfhnp4aeamnaflt8g0")
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
     headers = {
         "Authorization": f"Api-Key {api_key}",
@@ -274,7 +278,6 @@ async def apply_fixes(session_id: str):
         }
     )
 
-# ----- AI-РЕКОМЕНДАЦИИ К ОШИБКАМ -----
 @app.get("/recommendations/{session_id}")
 async def get_recommendations(session_id: str):
     session = SESSIONS.get(session_id)
@@ -309,7 +312,6 @@ async def get_recommendations(session_id: str):
     recommendations = query_yandex_gpt(prompt, max_tokens=500)
     return {"recommendations": recommendations.strip()}
 
-# ----- PULL REQUEST -----
 @app.post("/create_pr/{session_id}")
 async def create_pr(session_id: str, req: CreatePRRequest):
     session = SESSIONS.get(session_id)
@@ -336,7 +338,6 @@ async def create_pr(session_id: str, req: CreatePRRequest):
     except Exception as e:
         raise HTTPException(500, f"Ошибка при создании PR: {str(e)}")
 
-# ----- АВТОРСКИЕ ПРАВА -----
 @app.get("/copyright/{session_id}")
 async def check_copyright(session_id: str):
     session = SESSIONS.get(session_id)
@@ -367,7 +368,69 @@ async def apply_copyright(session_id: str, req: CopyrightApplyRequest):
     session["fixed_files"] = new_files
     return {"session_id": session_id, "status": "applied", "message": "Авторские права добавлены."}
 
-# ----- ЧАТ С YANDEXGPT -----
+# ===== ЦИФРОВОЙ СОВЕТ ДИРЕКТОРОВ =====
+ROLE_PROMPTS = {
+    "analyst": "Ты — ведущий аналитик. Дай общую картину состояния проекта на основе отчёта, выдели ключевые проблемы и предложи приоритеты исправлений.",
+    "architect": "Ты — архитектор. Оцени архитектурные риски, зависимости и циклические импорты. Предложи улучшения структуры проекта.",
+    "security": "Ты — специалист по безопасности. На основе отчёта проанализируй найденные уязвимости, утечки секретов и дай рекомендации по защите.",
+    "treasurer": "Ты — казначей. Оцени финансовые риски и стоимость технического долга на основе выявленных проблем. Дай прогноз затрат."
+}
+
+@app.post("/chat/advisor/{session_id}")
+async def chat_advisor(session_id: str, req: AdvisorChatRequest):
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Сессия не найдена")
+
+    context = ""
+    if session.get("report"):
+        context = report_to_summary(session["report"])
+
+    # Выбираем системный промпт по роли
+    system_prompt = ROLE_PROMPTS.get(req.role, ROLE_PROMPTS["analyst"])
+    # Формируем полный запрос
+    prompt = f"{system_prompt}\n\nКонтекст отчёта:\n{context}\n\nВопрос пользователя: {req.message}"
+
+    api_key = os.getenv("YANDEX_API_KEY")
+    if not api_key:
+        return {"reply": "Ошибка: не настроен API-ключ YandexGPT."}
+    folder_id = os.getenv("YANDEX_FOLDER_ID", "b1gfhnp4aeamnaflt8g0")
+    url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+    headers = {
+        "Authorization": f"Api-Key {api_key}",
+        "Content-Type": "application/json"
+    }
+    # Ограничиваем общий размер контекста
+    max_context_len = 2500
+    if len(prompt) > max_context_len:
+        # Оставляем системный промпт и обрезаем контекст
+        prompt = f"{system_prompt}\n\nКонтекст отчёта (сокращён):\n{context[:max_context_len - len(system_prompt) - 50]}...\n\nВопрос пользователя: {req.message}"
+
+    payload = {
+        "modelUri": f"gpt://{folder_id}/yandexgpt-lite",
+        "completionOptions": {
+            "stream": False,
+            "temperature": 0.6,
+            "maxTokens": 2000
+        },
+        "messages": [
+            {"role": "system", "text": system_prompt},
+            {"role": "user", "text": prompt}
+        ]
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        alternatives = data.get("result", {}).get("alternatives", [])
+        if alternatives:
+            return {"reply": alternatives[0].get("message", {}).get("text", "Нет ответа")}
+        else:
+            return {"reply": "Модель не вернула ответ."}
+    except Exception as e:
+        return {"reply": f"Ошибка при обращении к YandexGPT: {str(e)}"}
+
+# ----- ОБЫЧНЫЙ ЧАТ (оставлен для совместимости) -----
 @app.post("/chat/{session_id}")
 async def chat(session_id: str, req: ChatRequest):
     session = SESSIONS.get(session_id)
