@@ -6,7 +6,8 @@
 # ============================================
 
 """
-Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR, Пятиуровневый аудит, Цифровой совет директоров, Центр техдолга)
+Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR,
+Пятиуровневый аудит, Цифровой совет директоров, Арбитраж, Центр техдолга)
 """
 import os
 import uuid
@@ -51,12 +52,7 @@ app.add_middleware(
 
 SESSIONS: Dict[str, dict] = {}
 
-# Глобальные накопления (в памяти, сбрасываются при перезапуске)
-SAVINGS = {
-    "fixed": 0,   # устранено проблем
-    "hours": 0.0, # сэкономлено часов
-    "money": 0.0  # сэкономлено денег
-}
+SAVINGS = {"fixed": 0, "hours": 0.0, "money": 0.0}
 
 class RepoRequest(BaseModel):
     repo_url: HttpUrl
@@ -69,6 +65,9 @@ class AdvisorChatRequest(BaseModel):
     message: str
     role: str
 
+class ArbitrageRequest(BaseModel):
+    message: str
+
 class CopyrightApplyRequest(BaseModel):
     copyright_text: Optional[str] = None
     author: Optional[str] = None
@@ -80,7 +79,6 @@ class CreatePRRequest(BaseModel):
     title: Optional[str] = "Repo Validator automatic fixes"
     base_branch: Optional[str] = "main"
 
-# Модель для обновления накоплений
 class SavingsUpdateRequest(BaseModel):
     fixed: int = 0
     hours: float = 0.0
@@ -436,6 +434,79 @@ async def chat_advisor(session_id: str, req: AdvisorChatRequest):
             return {"reply": "Модель не вернула ответ."}
     except Exception as e:
         return {"reply": f"Ошибка при обращении к YandexGPT: {str(e)}"}
+
+# ===== АРБИТРАЖ =====
+@app.post("/chat/arbitrage/{session_id}")
+async def chat_arbitrage(session_id: str, req: ArbitrageRequest):
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Сессия не найдена")
+
+    context = ""
+    if session.get("report"):
+        context = report_to_summary(session["report"])
+
+    # Формируем промпт для двух ролей
+    prompt = (
+        "Предложи два конкретных варианта исправления следующей проблемы в коде. "
+        "Первый вариант — с точки зрения архитектора (минимизация зависимостей, улучшение структуры). "
+        "Второй вариант — с точки зрения безопасности (защита от уязвимостей). "
+        "Оформи ответ строго в формате:\n"
+        "АРХИТЕКТОР: <предложение архитектора>\n"
+        "БЕЗОПАСНИК: <предложение безопасника>\n\n"
+        f"Проблема: {req.message}\n"
+        f"Контекст отчёта:\n{context}"
+    )
+
+    api_key = os.getenv("YANDEX_API_KEY")
+    if not api_key:
+        return {"architect": "Ошибка: не настроен API-ключ", "security": "Ошибка: не настроен API-ключ"}
+    folder_id = os.getenv("YANDEX_FOLDER_ID", "b1gfhnp4aeamnaflt8g0")
+    url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+    headers = {
+        "Authorization": f"Api-Key {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "modelUri": f"gpt://{folder_id}/yandexgpt-lite",
+        "completionOptions": {
+            "stream": False,
+            "temperature": 0.7,
+            "maxTokens": 2000
+        },
+        "messages": [
+            {"role": "system", "text": "Ты — эксперт по анализу кода. Твоя задача — предложить два разных варианта исправления проблемы."},
+            {"role": "user", "text": prompt}
+        ]
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        alternatives = data.get("result", {}).get("alternatives", [])
+        if not alternatives:
+            return {"architect": "Модель не ответила", "security": "Модель не ответила"}
+        text = alternatives[0].get("message", {}).get("text", "")
+        # Парсим ответ
+        architect = ""
+        security = ""
+        lines = text.split('\n')
+        current_role = None
+        for line in lines:
+            if line.startswith("АРХИТЕКТОР:"):
+                current_role = "architect"
+                architect = line.replace("АРХИТЕКТОР:", "").strip()
+            elif line.startswith("БЕЗОПАСНИК:"):
+                current_role = "security"
+                security = line.replace("БЕЗОПАСНИК:", "").strip()
+            elif current_role == "architect":
+                architect += " " + line.strip()
+            elif current_role == "security":
+                security += " " + line.strip()
+        return {"architect": architect.strip() or "Нет ответа", "security": security.strip() or "Нет ответа"}
+    except Exception as e:
+        return {"architect": f"Ошибка: {str(e)}", "security": f"Ошибка: {str(e)}"}
 
 # ----- ОБЫЧНЫЙ ЧАТ -----
 @app.post("/chat/{session_id}")
