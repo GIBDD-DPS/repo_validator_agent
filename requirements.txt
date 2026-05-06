@@ -7,3 +7,5 @@ flake8
 bandit
 black
 isort
+pip-audit
+pip-licenses
