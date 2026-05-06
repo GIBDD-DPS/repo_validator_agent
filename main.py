@@ -7,7 +7,7 @@
 
 """
 Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR,
-Пятиуровневый аудит, Цифровой совет директоров, Арбитраж, Центр техдолга)
+Пятиуровневый аудит, Цифровой совет директоров, Арбитраж, Центр техдолга, Git Analyzer)
 """
 import os
 import uuid
@@ -31,6 +31,7 @@ from core.full_file_rewriter import FullFileRewriter
 from core.copyright_manager import CopyrightManager
 from core.github_integration import GitHubIntegration
 from core.prizolov_audit import PrizolovAuditor
+from core.git_analyzer import GitAnalyzer
 from config import settings
 
 app = FastAPI(title="Repo Validator Agent")
@@ -112,6 +113,15 @@ def run_analysis(session_id: str, repo_url: str):
         project_analyzer = comps["project_analyzer"]
         ast_analyzer = comps["ast_analyzer"]
         linter = comps["linter_runner"]
+        scanner = comps["scanner"]
+
+        # ----- Git Analyzer -----
+        git_stats = None
+        try:
+            git_analyzer = GitAnalyzer(scanner.local_path)
+            git_stats = git_analyzer.analyze()
+        except Exception as e:
+            git_stats = {"error": str(e)}
 
         project_issues = project_analyzer.analyze(files)
 
@@ -137,6 +147,7 @@ def run_analysis(session_id: str, repo_url: str):
                 for i in issues
             ]
         report["audit"] = serialized_audit
+        report["git_stats"] = git_stats
 
         session["report"] = report
         session["status"] = "done"
@@ -167,6 +178,15 @@ def report_to_summary(report: dict) -> str:
         for level, issues in report["audit"].items():
             if issues:
                 lines.append(f"Аудит {level_names.get(level, level)}:\n" + "\n".join(issues))
+    if report.get("git_stats") and not report["git_stats"].get("error"):
+        gs = report["git_stats"]
+        lines.append(
+            f"Git активность:\n"
+            f"- Коммитов: {gs['total_commits']}\n"
+            f"- Контрибьюторов: {gs['contributors_count']}\n"
+            f"- Активность: {'активен' if gs['is_active'] else 'заброшен'}\n"
+            f"- Последний коммит: {gs['last_commit']}"
+        )
     return "\n\n".join(lines) or "Проблем не найдено"
 
 # ----- YANDEX GPT HELPER -----
@@ -446,7 +466,6 @@ async def chat_arbitrage(session_id: str, req: ArbitrageRequest):
     if session.get("report"):
         context = report_to_summary(session["report"])
 
-    # Формируем промпт для двух ролей
     prompt = (
         "Предложи два конкретных варианта исправления следующей проблемы в коде. "
         "Первый вариант — с точки зрения архитектора (минимизация зависимостей, улучшение структуры). "
@@ -488,7 +507,6 @@ async def chat_arbitrage(session_id: str, req: ArbitrageRequest):
         if not alternatives:
             return {"architect": "Модель не ответила", "security": "Модель не ответила"}
         text = alternatives[0].get("message", {}).get("text", "")
-        # Парсим ответ
         architect = ""
         security = ""
         lines = text.split('\n')
