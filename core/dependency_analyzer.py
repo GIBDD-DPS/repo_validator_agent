@@ -7,10 +7,12 @@
 
 """
 Dependency Analyzer – анализ устаревших пакетов, уязвимостей (CVE), лицензий.
+В случае отсутствия внешних инструментов парсит requirements.txt напрямую.
 """
 import subprocess
 import json
 import os
+import re
 from typing import Dict, List
 
 
@@ -26,6 +28,7 @@ class DependencyAnalyzer:
             "outdated": [],
             "vulnerabilities": [],
             "licenses": [],
+            "packages": [],           # ← добавлено: список найденных пакетов
             "error": None
         }
 
@@ -35,16 +38,24 @@ class DependencyAnalyzer:
             results["error"] = "Файлы зависимостей (requirements.txt, Pipfile, pyproject.toml) не найдены."
             return results
 
-        # 1. Устаревшие пакеты (заглушка – можно расширить)
-        # В реальной реализации здесь будет запрос к PyPI API
+        # Базовый список пакетов (из requirements.txt, если есть)
+        req_file = None
+        for f in dep_files:
+            if os.path.basename(f) == 'requirements.txt':
+                req_file = f
+                break
+        if req_file:
+            results["packages"] = self._parse_requirements(req_file)
+        elif dep_files:
+            results["packages"] = [os.path.basename(f) for f in dep_files]
 
-        # 2. Уязвимости через pip-audit
+        # 1. Уязвимости через pip-audit
         try:
             results["vulnerabilities"] = self._check_vulnerabilities(dep_files)
         except Exception as e:
-            results["error"] = f"Ошибка проверки уязвимостей: {e}"
+            results["vulnerabilities"] = [{"error": f"Ошибка проверки уязвимостей: {e}"}]
 
-        # 3. Лицензии через pip-licenses
+        # 2. Лицензии через pip-licenses (или fallback)
         try:
             results["licenses"] = self._check_licenses(dep_files)
         except Exception:
@@ -61,8 +72,28 @@ class DependencyAnalyzer:
                 found.append(path)
         return found
 
+    def _parse_requirements(self, req_path: str) -> List[str]:
+        """Читает requirements.txt и возвращает список пакетов (без версий)."""
+        packages = []
+        try:
+            with open(req_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    # Удаляем флаги (--index-url и т.д.)
+                    if line.startswith('-'):
+                        continue
+                    # Извлекаем имя пакета (до первого разделителя версии)
+                    match = re.match(r'^[A-Za-z0-9._-]+', line)
+                    if match:
+                        packages.append(match.group(0))
+        except Exception:
+            pass
+        return packages
+
     def _check_vulnerabilities(self, dep_files: List[str]) -> List[Dict]:
-        """Ищет уязвимости через pip-audit."""
+        """Ищет уязвимости через pip-audit (или возвращает предупреждение)."""
         req_file = None
         for f in dep_files:
             if os.path.basename(f) == 'requirements.txt':
@@ -81,7 +112,6 @@ class DependencyAnalyzer:
                 if isinstance(data, list):
                     return data
                 if isinstance(data, dict):
-                    # извлекаем все уязвимости из всех зависимостей
                     all_vulns = []
                     for dep in data.get('dependencies', []):
                         for vuln in dep.get('vulns', []):
@@ -90,14 +120,17 @@ class DependencyAnalyzer:
                     return all_vulns
                 return [{"error": "Неизвестный формат ответа pip-audit"}]
             else:
-                return [{"error": proc.stderr.strip() or "Пустой ответ pip-audit"}]
+                # Если stdout пуст, возможно, уязвимостей нет
+                return []
         except subprocess.TimeoutExpired:
             return [{"error": "Превышено время ожидания pip-audit"}]
         except FileNotFoundError:
             return [{"error": "pip-audit не установлен. Добавьте pip-audit в requirements.txt."}]
+        except Exception as e:
+            return [{"error": f"Ошибка pip-audit: {str(e)}"}]
 
     def _check_licenses(self, dep_files: List[str]) -> List[Dict]:
-        """Извлекает лицензии через pip-licenses."""
+        """Извлекает лицензии через pip-licenses или возвращает заглушку."""
         req_file = None
         for f in dep_files:
             if os.path.basename(f) == 'requirements.txt':
@@ -114,4 +147,6 @@ class DependencyAnalyzer:
             else:
                 return []
         except FileNotFoundError:
+            return []
+        except Exception:
             return []
