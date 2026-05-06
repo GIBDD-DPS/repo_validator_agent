@@ -7,7 +7,7 @@
 
 """
 Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR,
-Пятиуровневый аудит, Цифровой совет директоров, Арбитраж, Центр техдолга, Git Analyzer)
+Пятиуровневый аудит, Цифровой совет директоров, Арбитраж, Центр техдолга, Git Analyzer, Dependency Intelligence)
 """
 import os
 import uuid
@@ -32,6 +32,7 @@ from core.copyright_manager import CopyrightManager
 from core.github_integration import GitHubIntegration
 from core.prizolov_audit import PrizolovAuditor
 from core.git_analyzer import GitAnalyzer
+from core.dependency_analyzer import DependencyAnalyzer
 from config import settings
 
 app = FastAPI(title="Repo Validator Agent")
@@ -123,6 +124,14 @@ def run_analysis(session_id: str, repo_url: str):
         except Exception as e:
             git_stats = {"error": str(e)}
 
+        # ----- Dependency Analyzer -----
+        dep_stats = None
+        try:
+            dep_analyzer = DependencyAnalyzer(scanner.local_path)
+            dep_stats = dep_analyzer.analyze()
+        except Exception as e:
+            dep_stats = {"error": str(e)}
+
         project_issues = project_analyzer.analyze(files)
 
         ast_issues = {}
@@ -148,6 +157,7 @@ def run_analysis(session_id: str, repo_url: str):
             ]
         report["audit"] = serialized_audit
         report["git_stats"] = git_stats
+        report["dep_stats"] = dep_stats   # ← добавляем анализ зависимостей
 
         session["report"] = report
         session["status"] = "done"
@@ -187,6 +197,13 @@ def report_to_summary(report: dict) -> str:
             f"- Активность: {'активен' if gs['is_active'] else 'заброшен'}\n"
             f"- Последний коммит: {gs['last_commit']}"
         )
+    if report.get("dep_stats"):
+        ds = report["dep_stats"]
+        if isinstance(ds, dict):
+            if ds.get("vulnerabilities"):
+                lines.append(f"Найдены уязвимости в зависимостях: {len(ds['vulnerabilities'])}")
+            if ds.get("licenses"):
+                lines.append(f"Лицензий проанализировано: {len(ds['licenses'])}")
     return "\n\n".join(lines) or "Проблем не найдено"
 
 # ----- YANDEX GPT HELPER -----
@@ -228,7 +245,6 @@ def query_yandex_gpt(prompt: str, context: str = "", max_tokens: int = 2000) -> 
         return f"Ошибка при обращении к YandexGPT: {str(e)}"
 
 # ----- ЭНДПОИНТЫ -----
-
 @app.post("/scan")
 async def start_scan(request: RepoRequest, background_tasks: BackgroundTasks):
     session_id = str(uuid.uuid4())
