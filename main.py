@@ -8,7 +8,7 @@
 """
 Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR,
 Пятиуровневый аудит, Цифровой совет директоров, Арбитраж, Центр техдолга, Git Analyzer,
-Dependency Intelligence, Semantic AI Layer, Scoring Engine)
+Dependency Intelligence, Semantic AI Layer, Scoring Engine, Smart Triage)
 """
 import os
 import uuid
@@ -36,6 +36,7 @@ from core.git_analyzer import GitAnalyzer
 from core.dependency_analyzer import DependencyAnalyzer
 from core.semantic_ai import SemanticAI
 from core.scoring_engine import ScoringEngine
+from core.smart_triage import SmartTriage      # ← новый импорт
 from config import settings
 
 app = FastAPI(title="Repo Validator Agent")
@@ -191,6 +192,21 @@ def run_analysis(session_id: str, repo_url: str):
             scoring = {"error": str(e)}
 
         report["scoring"] = scoring
+
+        # ----- Smart Triage -----
+        triage = None
+        try:
+            triager = SmartTriage()
+            # Собираем все ошибки из аудита (все уровни)
+            all_issues = []
+            if "audit" in report:
+                for issues in report["audit"].values():
+                    all_issues.extend(issues)
+            triage = triager.prioritize(all_issues)
+        except Exception as e:
+            triage = [{"issue": "Ошибка Smart Triage", "priority": 0, "reason": str(e), "effort": "?"}]
+
+        report["triage"] = triage   # ← добавляем результаты приоритезации
 
         session["report"] = report
         session["status"] = "done"
