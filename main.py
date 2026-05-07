@@ -8,7 +8,7 @@
 """
 Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR,
 Пятиуровневый аудит, Цифровой совет директоров, Арбитраж, Центр техдолга, Git Analyzer,
-Dependency Intelligence, Semantic AI Layer)
+Dependency Intelligence, Semantic AI Layer, Scoring Engine)
 """
 import os
 import uuid
@@ -34,7 +34,8 @@ from core.github_integration import GitHubIntegration
 from core.prizolov_audit import PrizolovAuditor
 from core.git_analyzer import GitAnalyzer
 from core.dependency_analyzer import DependencyAnalyzer
-from core.semantic_ai import SemanticAI       # ← новый импорт
+from core.semantic_ai import SemanticAI
+from core.scoring_engine import ScoringEngine
 from config import settings
 
 app = FastAPI(title="Repo Validator Agent")
@@ -161,21 +162,15 @@ def run_analysis(session_id: str, repo_url: str):
         report["git_stats"] = git_stats
         report["dep_stats"] = dep_stats
 
-        # ----- SEMANTIC AI LAYER -----
+        # ----- Semantic AI Layer -----
         semantic = None
         try:
             ai = SemanticAI()
-            # Собираем контекст для AI-агентов
-            context = report_to_summary(report)  # уже включает аудит, git, dep
-            # 1. Code Understanding
+            context = report_to_summary(report)
             code_purpose = ai.analyze_code_purpose(context)
-            # 2. Architecture Guardian
             arch_eval = ai.evaluate_architecture(context)
-            # 3. Risk Agent
             risk_assessment = ai.assess_risk(context)
-            # 4. Value Agent
             value_estimation = ai.estimate_value(context)
-            # 5. Documentation Agent (пока не используем, но можем добавить)
             semantic = {
                 "code_purpose": code_purpose,
                 "architecture_evaluation": arch_eval,
@@ -185,7 +180,17 @@ def run_analysis(session_id: str, repo_url: str):
         except Exception as e:
             semantic = {"error": f"Ошибка семантического анализа: {str(e)}"}
 
-        report["semantic"] = semantic   # ← добавляем семантические данные
+        report["semantic"] = semantic
+
+        # ----- Scoring Engine -----
+        scoring = None
+        try:
+            engine = ScoringEngine()
+            scoring = engine.compute(report)
+        except Exception as e:
+            scoring = {"error": str(e)}
+
+        report["scoring"] = scoring
 
         session["report"] = report
         session["status"] = "done"
@@ -241,6 +246,15 @@ def report_to_summary(report: dict) -> str:
                 f"- Тип проекта: {cp.get('project_type', 'неизвестен')}\n"
                 f"- Назначение: {cp.get('description', '')[:200]}..."
             )
+    if report.get("scoring") and not report["scoring"].get("error"):
+        sc = report["scoring"]
+        lines.append(
+            f"Scoring:\n"
+            f"Repo Score: {sc['repo_score']}/100\n"
+            f"Risk Score: {sc['risk_score']}/100\n"
+            f"Readiness: {sc['readiness']}%\n"
+            f"Tech Debt: {sc['tech_debt_hours']}h (${sc['tech_debt_money']})"
+        )
     return "\n\n".join(lines) or "Проблем не найдено"
 
 # ----- YANDEX GPT HELPER (для чата) -----
