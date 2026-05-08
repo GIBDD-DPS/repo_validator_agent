@@ -8,7 +8,8 @@
 """
 Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR,
 Пятиуровневый аудит, Цифровой совет директоров, Арбитраж, Центр техдолга, Git Analyzer,
-Dependency Intelligence, Semantic AI Layer, Scoring Engine, Smart Triage, Contextual Mentor)
+Dependency Intelligence, Semantic AI Layer, Scoring Engine, Smart Triage, Contextual Mentor,
+ROI Calculator & Business Impact)
 """
 import os
 import uuid
@@ -37,7 +38,8 @@ from core.dependency_analyzer import DependencyAnalyzer
 from core.semantic_ai import SemanticAI
 from core.scoring_engine import ScoringEngine
 from core.smart_triage import SmartTriage
-from core.mentor import ContextualMentor   # <-- новый импорт
+from core.mentor import ContextualMentor
+from core.roi_calculator import ROICalculator    # ← новый импорт
 from config import settings
 
 app = FastAPI(title="Repo Validator Agent")
@@ -212,6 +214,16 @@ def run_analysis(session_id: str, repo_url: str):
 
         report["triage"] = triage
 
+        # ----- ROI Calculator -----
+        roi = None
+        try:
+            roi_calc = ROICalculator(hourly_rate=50.0)
+            roi = roi_calc.compute(report, scoring)
+        except Exception as e:
+            roi = {"error": f"Ошибка расчёта ROI: {str(e)}"}
+
+        report["roi"] = roi   # ← добавляем ROI
+
         session["report"] = report
         session["status"] = "done"
         session["files"] = files
@@ -274,6 +286,15 @@ def report_to_summary(report: dict) -> str:
             f"Risk Score: {sc['risk_score']}/100\n"
             f"Readiness: {sc['readiness']}%\n"
             f"Tech Debt: {sc['tech_debt_hours']}h (${sc['tech_debt_money']})"
+        )
+    if report.get("roi") and not report["roi"].get("error"):
+        r = report["roi"]
+        lines.append(
+            f"ROI:\n"
+            f"Стоимость техдолга: ${r.get('tech_debt_cost', 0)}\n"
+            f"Потенциальная экономия: ${r.get('potential_savings', 0)}\n"
+            f"ROI: {r.get('roi_percent', 0)}%\n"
+            f"Влияние на бизнес: {r.get('business_impact', '')}"
         )
     return "\n\n".join(lines) or "Проблем не найдено"
 
