@@ -8,7 +8,7 @@
 """
 Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR,
 Пятиуровневый аудит, Цифровой совет директоров, Арбитраж, Центр техдолга, Git Analyzer,
-Dependency Intelligence, Semantic AI Layer, Scoring Engine, Smart Triage)
+Dependency Intelligence, Semantic AI Layer, Scoring Engine, Smart Triage, Contextual Mentor)
 """
 import os
 import uuid
@@ -36,7 +36,8 @@ from core.git_analyzer import GitAnalyzer
 from core.dependency_analyzer import DependencyAnalyzer
 from core.semantic_ai import SemanticAI
 from core.scoring_engine import ScoringEngine
-from core.smart_triage import SmartTriage      # ← новый импорт
+from core.smart_triage import SmartTriage
+from core.mentor import ContextualMentor   # <-- новый импорт
 from config import settings
 
 app = FastAPI(title="Repo Validator Agent")
@@ -73,6 +74,10 @@ class AdvisorChatRequest(BaseModel):
 
 class ArbitrageRequest(BaseModel):
     message: str
+
+class MentorRequest(BaseModel):
+    issue: str
+    file_context: Optional[str] = None
 
 class CopyrightApplyRequest(BaseModel):
     copyright_text: Optional[str] = None
@@ -197,7 +202,6 @@ def run_analysis(session_id: str, repo_url: str):
         triage = None
         try:
             triager = SmartTriage()
-            # Собираем все ошибки из аудита (все уровни)
             all_issues = []
             if "audit" in report:
                 for issues in report["audit"].values():
@@ -206,7 +210,7 @@ def run_analysis(session_id: str, repo_url: str):
         except Exception as e:
             triage = [{"issue": "Ошибка Smart Triage", "priority": 0, "reason": str(e), "effort": "?"}]
 
-        report["triage"] = triage   # ← добавляем результаты приоритезации
+        report["triage"] = triage
 
         session["report"] = report
         session["status"] = "done"
@@ -608,6 +612,17 @@ async def chat_arbitrage(session_id: str, req: ArbitrageRequest):
         return {"architect": architect.strip() or "Нет ответа", "security": security.strip() or "Нет ответа"}
     except Exception as e:
         return {"architect": f"Ошибка: {str(e)}", "security": f"Ошибка: {str(e)}"}
+
+# ===== КОНТЕКСТНЫЙ МЕНТОР =====
+@app.post("/chat/mentor/{session_id}")
+async def chat_mentor(session_id: str, req: MentorRequest):
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Сессия не найдена")
+
+    mentor = ContextualMentor()
+    suggestion = mentor.suggest_fix(req.issue, req.file_context)
+    return {"reply": suggestion}
 
 # ----- ОБЫЧНЫЙ ЧАТ -----
 @app.post("/chat/{session_id}")
