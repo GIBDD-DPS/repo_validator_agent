@@ -9,7 +9,7 @@
 Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR,
 Пятиуровневый аудит, Цифровой совет директоров, Арбитраж, Центр техдолга, Git Analyzer,
 Dependency Intelligence, Semantic AI Layer, Scoring Engine, Smart Triage, Contextual Mentor,
-ROI Calculator & Business Impact)
+ROI Calculator, Audit Trail, Repo Publisher)
 """
 import os
 import uuid
@@ -39,7 +39,9 @@ from core.semantic_ai import SemanticAI
 from core.scoring_engine import ScoringEngine
 from core.smart_triage import SmartTriage
 from core.mentor import ContextualMentor
-from core.roi_calculator import ROICalculator    # ← новый импорт
+from core.roi_calculator import ROICalculator
+from core.audit_trail import AuditTrail          # <-- скрытая история
+from core.repo_publisher import RepoPublisher   # <-- публикация в репо
 from config import settings
 
 app = FastAPI(title="Repo Validator Agent")
@@ -80,6 +82,10 @@ class ArbitrageRequest(BaseModel):
 class MentorRequest(BaseModel):
     issue: str
     file_context: Optional[str] = None
+
+class PublishRequest(BaseModel):
+    github_token: str
+    action: str  # "issue" или "label"
 
 class CopyrightApplyRequest(BaseModel):
     copyright_text: Optional[str] = None
@@ -175,6 +181,10 @@ def run_analysis(session_id: str, repo_url: str):
         try:
             ai = SemanticAI()
             context = report_to_summary(report)
+            # добавляем скрытую историю, если она есть
+            hist_ctx = _get_audit_context(scanner.local_path)
+            if hist_ctx:
+                context = hist_ctx + "\n\n" + context
             code_purpose = ai.analyze_code_purpose(context)
             arch_eval = ai.evaluate_architecture(context)
             risk_assessment = ai.assess_risk(context)
@@ -222,7 +232,10 @@ def run_analysis(session_id: str, repo_url: str):
         except Exception as e:
             roi = {"error": f"Ошибка расчёта ROI: {str(e)}"}
 
-        report["roi"] = roi   # ← добавляем ROI
+        report["roi"] = roi
+
+        # ----- Сохраняем скрытый аудит -----
+        _save_audit_record(session_id, scanner.local_path, report_to_summary(report), scoring)
 
         session["report"] = report
         session["status"] = "done"
@@ -230,6 +243,16 @@ def run_analysis(session_id: str, repo_url: str):
     except Exception as e:
         session["status"] = "error"
         session["error"] = str(e)
+
+def _get_audit_context(repo_path: str) -> str:
+    trail = AuditTrail(repo_path)
+    return trail.get_history_context()
+
+def _save_audit_record(session_id: str, repo_path: str, summary: str, scoring: Dict) -> None:
+    if not scoring or scoring.get("error"):
+        return
+    trail = AuditTrail(repo_path)
+    trail.save(session_id, summary, scoring)
 
 def report_to_summary(report: dict) -> str:
     lines = []
@@ -298,7 +321,7 @@ def report_to_summary(report: dict) -> str:
         )
     return "\n\n".join(lines) or "Проблем не найдено"
 
-# ----- YANDEX GPT HELPER (для чата) -----
+# ----- YANDEX GPT HELPER -----
 def query_yandex_gpt(prompt: str, context: str = "", max_tokens: int = 2000) -> str:
     api_key = os.getenv("YANDEX_API_KEY")
     if not api_key:
@@ -522,6 +545,12 @@ async def chat_advisor(session_id: str, req: AdvisorChatRequest):
     context = ""
     if session.get("report"):
         context = report_to_summary(session["report"])
+        # добавляем скрытую историю, если есть
+        scanner = RepositoryScanner(session["repo_url"])
+        scanner.clone()
+        hist_ctx = _get_audit_context(scanner.local_path)
+        if hist_ctx:
+            context = hist_ctx + "\n\n" + context
 
     system_prompt = ROLE_PROMPTS.get(req.role, ROLE_PROMPTS["analyst"])
     prompt = f"{system_prompt}\n\nКонтекст отчёта:\n{context}\n\nВопрос пользователя: {req.message}"
@@ -645,6 +674,59 @@ async def chat_mentor(session_id: str, req: MentorRequest):
     suggestion = mentor.suggest_fix(req.issue, req.file_context)
     return {"reply": suggestion}
 
+# ===== ПУБЛИКАЦИЯ РЕЗУЛЬТАТА В РЕПОЗИТОРИЙ (Issue или Label) =====
+@app.post("/publish/{session_id}")
+async def publish_results(session_id: str, req: PublishRequest):
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(404, "Сессия не найдена")
+    if session.get("status") != "done":
+        raise HTTPException(400, "Отчёт ещё не готов")
+
+    report = session.get("report", {})
+    summary = report_to_summary(report)
+    publisher = RepoPublisher(req.github_token)
+    repo_url = session["repo_url"]
+
+    scoring = report.get("scoring", {})
+    repo_score_before = scoring.get("repo_score", 0)
+    repo_score_after = repo_score_before  # после автофиксов скор не пересчитывается
+
+    body = (
+        f"## 🤖 Отчёт Repo Validator\n\n"
+        f"**Проверка выполнена:** {repo_url}\n"
+        f"**Агент:** Prizolov Repo Validator (автор: Dm.Andreyanov)\n"
+        f"**Дата проверки:** {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+        f"**Оценка до оптимизации:** {repo_score_before}/100\n"
+        f"**Оценка после оптимизации:** {repo_score_after}/100\n\n"
+        f"### Полный отчёт\n```\n{summary}\n```"
+    )
+
+    if req.action == "issue":
+        title = "🤖 Repo Validator: проверка кода"
+        issue_url = publisher.publish_issue(repo_url, title, body)
+        if issue_url:
+            return {"status": "success", "url": issue_url}
+        else:
+            raise HTTPException(500, "Не удалось создать Issue. Проверьте права токена и существование репозитория.")
+
+    elif req.action == "label":
+        label_name = f"repo-score-{int(repo_score_before)}"
+        description = f"Repo Score: {repo_score_before}/100 (проверено агентом Dm.Andreyanov)"
+        if repo_score_before >= 80:
+            color = "0e8a16"
+        elif repo_score_before >= 60:
+            color = "fbca04"
+        else:
+            color = "d93f0b"
+        success = publisher.set_label(repo_url, label_name, color, description)
+        if success:
+            return {"status": "success", "label": label_name}
+        else:
+            raise HTTPException(500, "Не удалось установить метку.")
+    else:
+        raise HTTPException(400, "Неверный action. Допустимые значения: 'issue', 'label'.")
+
 # ----- ОБЫЧНЫЙ ЧАТ -----
 @app.post("/chat/{session_id}")
 async def chat(session_id: str, req: ChatRequest):
@@ -654,6 +736,11 @@ async def chat(session_id: str, req: ChatRequest):
     context = ""
     if session.get("report"):
         context = report_to_summary(session["report"])
+        scanner = RepositoryScanner(session["repo_url"])
+        scanner.clone()
+        hist_ctx = _get_audit_context(scanner.local_path)
+        if hist_ctx:
+            context = hist_ctx + "\n\n" + context
     reply = query_yandex_gpt(req.message, context)
     return {"reply": reply}
 
