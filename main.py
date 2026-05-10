@@ -9,7 +9,7 @@
 Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR,
 Пятиуровневый аудит, Цифровой совет директоров, Арбитраж, Центр техдолга, Git Analyzer,
 Dependency Intelligence, Semantic AI Layer, Scoring Engine, Smart Triage, Contextual Mentor,
-ROI Calculator, Audit Trail, Repo Publisher)
+ROI Calculator, Audit Trail, Repo Publisher, Multi-Language Support)
 """
 import os
 import uuid
@@ -40,8 +40,9 @@ from core.scoring_engine import ScoringEngine
 from core.smart_triage import SmartTriage
 from core.mentor import ContextualMentor
 from core.roi_calculator import ROICalculator
-from core.audit_trail import AuditTrail          # <-- скрытая история
-from core.repo_publisher import RepoPublisher   # <-- публикация в репо
+from core.audit_trail import AuditTrail
+from core.repo_publisher import RepoPublisher
+from core.multi_lang_analyzer import MultiLangAnalyzer   # <-- новый импорт
 from config import settings
 
 app = FastAPI(title="Repo Validator Agent")
@@ -149,6 +150,14 @@ def run_analysis(session_id: str, repo_url: str):
         except Exception as e:
             dep_stats = {"error": str(e)}
 
+        # ----- Multi-Language Analyzer -----
+        multi_lang_issues = {}
+        try:
+            mla = MultiLangAnalyzer()
+            multi_lang_issues = mla.analyze(files)
+        except Exception as e:
+            multi_lang_issues = {"error": str(e)}
+
         project_issues = project_analyzer.analyze(files)
 
         ast_issues = {}
@@ -162,6 +171,7 @@ def run_analysis(session_id: str, repo_url: str):
             "project_issues": project_issues,
             "ast_issues": ast_issues,
             "lint_issues": lint_issues,
+            "multi_lang_issues": multi_lang_issues,   # <-- добавляем
         }
 
         auditor = PrizolovAuditor()
@@ -181,7 +191,6 @@ def run_analysis(session_id: str, repo_url: str):
         try:
             ai = SemanticAI()
             context = report_to_summary(report)
-            # добавляем скрытую историю, если она есть
             hist_ctx = _get_audit_context(scanner.local_path)
             if hist_ctx:
                 context = hist_ctx + "\n\n" + context
@@ -266,6 +275,10 @@ def report_to_summary(report: dict) -> str:
         for f, issues in report["lint_issues"].items():
             if issues:
                 lines.append(f"Линтеры ({f}):\n" + "\n".join(issues))
+    if report.get("multi_lang_issues"):
+        for f, issues in report["multi_lang_issues"].items():
+            if issues:
+                lines.append(f"Мультиязычный анализ ({f}):\n" + "\n".join(issues))
     if report.get("audit"):
         level_names = {
             "architecture": "Архитектура",
@@ -463,6 +476,9 @@ async def get_recommendations(session_id: str):
     for level, issues in report.get("audit", {}).items():
         for i in issues:
             all_issues.append(f"Аудит ({level}): {i}")
+    for file, issues in report.get("multi_lang_issues", {}).items():
+        for i in issues:
+            all_issues.append(f"Lang ({file}): {i}")
 
     if not all_issues:
         return {"recommendations": "Ошибок нет"}
@@ -545,7 +561,6 @@ async def chat_advisor(session_id: str, req: AdvisorChatRequest):
     context = ""
     if session.get("report"):
         context = report_to_summary(session["report"])
-        # добавляем скрытую историю, если есть
         scanner = RepositoryScanner(session["repo_url"])
         scanner.clone()
         hist_ctx = _get_audit_context(scanner.local_path)
@@ -674,7 +689,7 @@ async def chat_mentor(session_id: str, req: MentorRequest):
     suggestion = mentor.suggest_fix(req.issue, req.file_context)
     return {"reply": suggestion}
 
-# ===== ПУБЛИКАЦИЯ РЕЗУЛЬТАТА В РЕПОЗИТОРИЙ (Issue или Label) =====
+# ===== ПУБЛИКАЦИЯ РЕЗУЛЬТАТА В РЕПОЗИТОРИЙ =====
 @app.post("/publish/{session_id}")
 async def publish_results(session_id: str, req: PublishRequest):
     session = SESSIONS.get(session_id)
@@ -690,7 +705,7 @@ async def publish_results(session_id: str, req: PublishRequest):
 
     scoring = report.get("scoring", {})
     repo_score_before = scoring.get("repo_score", 0)
-    repo_score_after = repo_score_before  # после автофиксов скор не пересчитывается
+    repo_score_after = repo_score_before
 
     body = (
         f"## 🤖 Отчёт Repo Validator\n\n"
@@ -708,8 +723,7 @@ async def publish_results(session_id: str, req: PublishRequest):
         if issue_url:
             return {"status": "success", "url": issue_url}
         else:
-            raise HTTPException(500, "Не удалось создать Issue. Проверьте права токена и существование репозитория.")
-
+            raise HTTPException(500, "Не удалось создать Issue.")
     elif req.action == "label":
         label_name = f"repo-score-{int(repo_score_before)}"
         description = f"Repo Score: {repo_score_before}/100 (проверено агентом Dm.Andreyanov)"
