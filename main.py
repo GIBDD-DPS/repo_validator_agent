@@ -9,7 +9,8 @@
 Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR,
 Пятиуровневый аудит, Цифровой совет директоров, Арбитраж, Центр техдолга, Git Analyzer,
 Dependency Intelligence, Semantic AI Layer, Scoring Engine, Smart Triage, Contextual Mentor,
-ROI Calculator, Audit Trail, Repo Publisher, Multi-Language Support, Autonomous Pipeline)
+ROI Calculator, Audit Trail, Repo Publisher, Multi-Language Support, Autonomous Pipeline,
+Public Leaderboard)
 """
 import os
 import uuid
@@ -43,6 +44,7 @@ from core.roi_calculator import ROICalculator
 from core.audit_trail import AuditTrail
 from core.repo_publisher import RepoPublisher
 from core.multi_lang_analyzer import MultiLangAnalyzer
+from core.leaderboard import Leaderboard        # <-- новый импорт
 from config import settings
 
 app = FastAPI(title="Repo Validator Agent")
@@ -65,6 +67,9 @@ app.add_middleware(
 SESSIONS: Dict[str, dict] = {}
 
 SAVINGS = {"fixed": 0, "hours": 0.0, "money": 0.0}
+
+# Глобальный лидерборд (в памяти)
+LEADERBOARD = Leaderboard()
 
 class RepoRequest(BaseModel):
     repo_url: HttpUrl
@@ -254,6 +259,15 @@ def run_analysis(session_id: str, repo_url: str):
 
         # ----- Сохраняем скрытый аудит -----
         _save_audit_record(session_id, scanner.local_path, report_to_summary(report), scoring)
+
+        # ----- Обновляем лидерборд -----
+        primary_lang = "unknown"
+        if semantic and not semantic.get("error") and semantic.get("code_purpose"):
+            techs = semantic["code_purpose"].get("key_technologies", [])
+            if isinstance(techs, list) and len(techs) > 0:
+                primary_lang = techs[0]  # первый в списке технологий
+
+        LEADERBOARD.add_result(repo_url, scoring, primary_lang)
 
         session["report"] = report
         session["status"] = "done"
@@ -796,6 +810,11 @@ async def autonomous_fix(session_id: str, req: AutonomousFixRequest):
         return {"status": "success", "pull_request_url": pr_url}
     except Exception as e:
         raise HTTPException(500, f"Ошибка при создании PR: {str(e)}")
+
+# ===== ЛИДЕРБОРД =====
+@app.get("/leaderboard")
+async def get_leaderboard(sort_by: str = "repo_score", language: str = None, limit: int = 10):
+    return LEADERBOARD.get_top(limit=limit, sort_by=sort_by, language=language)
 
 # ----- ОБЫЧНЫЙ ЧАТ -----
 @app.post("/chat/{session_id}")
