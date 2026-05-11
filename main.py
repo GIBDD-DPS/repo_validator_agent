@@ -9,7 +9,7 @@
 Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR,
 Пятиуровневый аудит, Цифровой совет директоров, Арбитраж, Центр техдолга, Git Analyzer,
 Dependency Intelligence, Semantic AI Layer, Scoring Engine, Smart Triage, Contextual Mentor,
-ROI Calculator, Audit Trail, Repo Publisher, Multi-Language Support)
+ROI Calculator, Audit Trail, Repo Publisher, Multi-Language Support, Autonomous Pipeline)
 """
 import os
 import uuid
@@ -42,7 +42,7 @@ from core.mentor import ContextualMentor
 from core.roi_calculator import ROICalculator
 from core.audit_trail import AuditTrail
 from core.repo_publisher import RepoPublisher
-from core.multi_lang_analyzer import MultiLangAnalyzer   # <-- новый импорт
+from core.multi_lang_analyzer import MultiLangAnalyzer
 from config import settings
 
 app = FastAPI(title="Repo Validator Agent")
@@ -98,6 +98,15 @@ class CreatePRRequest(BaseModel):
     github_token: str
     title: Optional[str] = "Repo Validator automatic fixes"
     base_branch: Optional[str] = "main"
+
+class AutonomousFixRequest(BaseModel):
+    github_token: str
+    title: Optional[str] = "Repo Validator autonomous fixes"
+    base_branch: Optional[str] = "main"
+    apply_copyright: bool = False
+    copyright_author: Optional[str] = None
+    copyright_organization: Optional[str] = None
+    copyright_product: Optional[str] = None
 
 class SavingsUpdateRequest(BaseModel):
     fixed: int = 0
@@ -171,7 +180,7 @@ def run_analysis(session_id: str, repo_url: str):
             "project_issues": project_issues,
             "ast_issues": ast_issues,
             "lint_issues": lint_issues,
-            "multi_lang_issues": multi_lang_issues,   # <-- добавляем
+            "multi_lang_issues": multi_lang_issues,
         }
 
         auditor = PrizolovAuditor()
@@ -689,7 +698,7 @@ async def chat_mentor(session_id: str, req: MentorRequest):
     suggestion = mentor.suggest_fix(req.issue, req.file_context)
     return {"reply": suggestion}
 
-# ===== ПУБЛИКАЦИЯ РЕЗУЛЬТАТА В РЕПОЗИТОРИЙ =====
+# ===== ПУБЛИКАЦИЯ В РЕПОЗИТОРИЙ =====
 @app.post("/publish/{session_id}")
 async def publish_results(session_id: str, req: PublishRequest):
     session = SESSIONS.get(session_id)
@@ -740,6 +749,53 @@ async def publish_results(session_id: str, req: PublishRequest):
             raise HTTPException(500, "Не удалось установить метку.")
     else:
         raise HTTPException(400, "Неверный action. Допустимые значения: 'issue', 'label'.")
+
+# ===== АВТОНОМНЫЙ ПАЙПЛАЙН =====
+@app.post("/autonomous-fix/{session_id}")
+async def autonomous_fix(session_id: str, req: AutonomousFixRequest):
+    session = SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(404, "Сессия не найдена")
+    if session.get("status") != "done":
+        raise HTTPException(400, "Отчёт ещё не готов")
+
+    # 1. Автофиксы
+    engine = StepFixEngine()
+    files = session.get("files", {})
+    if not files:
+        raise HTTPException(500, "Нет файлов для обработки")
+    new_files = engine.format_all(files)
+
+    # 2. Копирайт (опционально)
+    if req.apply_copyright:
+        mgr = CopyrightManager()
+        new_files = mgr.apply_copyright(
+            new_files,
+            author=req.copyright_author,
+            organization=req.copyright_organization,
+            product=req.copyright_product,
+            skip_existing=True
+        )
+
+    session["fixed_files"] = new_files
+
+    # 3. Создание PR
+    github = GitHubIntegration(req.github_token)
+    summary = report_to_summary(session.get("report", {}))
+    body = f"## Автономный Fix Repo Validator\n```\n{summary}\n```"
+    try:
+        pr_url = github.create_pr(
+            repo_url=session["repo_url"],
+            files=new_files,
+            base_branch=req.base_branch,
+            title=req.title,
+            body=body
+        )
+        if not pr_url:
+            raise HTTPException(500, "Не удалось создать PR")
+        return {"status": "success", "pull_request_url": pr_url}
+    except Exception as e:
+        raise HTTPException(500, f"Ошибка при создании PR: {str(e)}")
 
 # ----- ОБЫЧНЫЙ ЧАТ -----
 @app.post("/chat/{session_id}")
