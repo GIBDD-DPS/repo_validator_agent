@@ -1,12 +1,8 @@
-meta:
-  environment: python
-  toolchain:
-    name: pip
-    version: "3.11"
-build:
-  requirementsPath: requirements.txt
-run:
-  command: null
-  containerPort: 80
-  scriptName: main.py
-  persistenceMount: /tmp
+# amvera.yml
+runtime: python
+python:
+  version: "3.11"
+  install:
+    - pip install -r requirements.txt
+  start:
+    - uvicorn app.main:app --host 0.0.0.0 --port $PORT
