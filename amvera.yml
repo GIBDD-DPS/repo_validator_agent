@@ -3,11 +3,10 @@ meta:
   toolchain:
     name: pip
     version: "3.11"
-
 build:
   requirementsPath: requirements.txt
-  useCache: true
-
 run:
-  command: uvicorn app.main:app --host 0.0.0.0 --port 80
+  command: null
   containerPort: 80
+  scriptName: main.py
+  persistenceMount: /tmp
