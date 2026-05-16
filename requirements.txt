@@ -10,3 +10,5 @@ bandit==1.7.5
 flake8==6.1.0
 mangum==0.17.0
 httpx==0.25.1
+redis
+aioredis
