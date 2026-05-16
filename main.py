@@ -39,24 +39,33 @@ except ImportError:
     settings.app_name = "Prizolov Repo Validator"
     settings.debug = False
 
-# ========== ЗАГРУЗКА МОДУЛЕЙ CORE С ЗАГЛУШКАМИ ==========
-core_modules = {}
+# ========== ФУНКЦИЯ СОЗДАНИЯ КЛАССОВ-ЗАГЛУШЕК ==========
+def make_stub_class(name: str):
+    """Создаёт класс-заглушку, который можно инстанцировать, и его методы ничего не делают."""
+    class StubClass:
+        def __init__(self, *args, **kwargs):
+            logger.warning(f"[STUB] {name} инициализирован с args={args}, kwargs={kwargs}")
+        def __getattr__(self, item):
+            logger.warning(f"[STUB] {name}.{item} вызван, но не реализован")
+            def stub_method(*args, **kwargs):
+                logger.warning(f"[STUB] {name}.{item}({args}, {kwargs}) — заглушка")
+                return {} if item != "analyze" else {}
+            return stub_method
+    StubClass.__name__ = name
+    return StubClass
 
-def safe_import(module_name, class_name):
+# ========== ЗАГРУЗКА МОДУЛЕЙ CORE С ЗАГЛУШКАМИ ==========
+core_classes = {}
+
+def safe_import_class(module_name, class_name):
     try:
         module = __import__(f"core.{module_name}", fromlist=[class_name])
-        return getattr(module, class_name)
+        cls = getattr(module, class_name)
+        logger.info(f"Загружен {class_name} из core.{module_name}")
+        return cls
     except (ImportError, AttributeError) as e:
         logger.warning(f"Не удалось импортировать {class_name} из core.{module_name}: {e}")
-        return None
-
-# Создаём классы-заглушки для отсутствующих модулей
-class Stub:
-    def __init__(self, name):
-        self.name = name
-    def __getattr__(self, item):
-        logger.warning(f"Вызов заглушки {self.name}.{item}")
-        return lambda *args, **kwargs: {}
+        return make_stub_class(class_name)
 
 # Список необходимых классов
 required_classes = [
@@ -83,32 +92,29 @@ required_classes = [
 ]
 
 for mod, cls in required_classes:
-    impl = safe_import(mod, cls)
-    if impl is None:
-        impl = Stub(cls)
-    core_modules[cls] = impl
+    core_classes[cls] = safe_import_class(mod, cls)
 
 # Извлекаем классы в глобальное пространство
-RepositoryScanner = core_modules["RepositoryScanner"]
-ProjectAnalyzer = core_modules["ProjectAnalyzer"]
-StepFixEngine = core_modules["StepFixEngine"]
-LinterRunner = core_modules["LinterRunner"]
-ASTAnalyzer = core_modules["ASTAnalyzer"]
-FullFileRewriter = core_modules["FullFileRewriter"]
-CopyrightManager = core_modules["CopyrightManager"]
-GitHubIntegration = core_modules["GitHubIntegration"]
-PrizolovAuditor = core_modules["PrizolovAuditor"]
-GitAnalyzer = core_modules["GitAnalyzer"]
-DependencyAnalyzer = core_modules["DependencyAnalyzer"]
-SemanticAI = core_modules["SemanticAI"]
-ScoringEngine = core_modules["ScoringEngine"]
-SmartTriage = core_modules["SmartTriage"]
-ContextualMentor = core_modules["ContextualMentor"]
-ROICalculator = core_modules["ROICalculator"]
-AuditTrail = core_modules["AuditTrail"]
-RepoPublisher = core_modules["RepoPublisher"]
-MultiLangAnalyzer = core_modules["MultiLangAnalyzer"]
-Leaderboard = core_modules["Leaderboard"]
+RepositoryScanner = core_classes["RepositoryScanner"]
+ProjectAnalyzer = core_classes["ProjectAnalyzer"]
+StepFixEngine = core_classes["StepFixEngine"]
+LinterRunner = core_classes["LinterRunner"]
+ASTAnalyzer = core_classes["ASTAnalyzer"]
+FullFileRewriter = core_classes["FullFileRewriter"]
+CopyrightManager = core_classes["CopyrightManager"]
+GitHubIntegration = core_classes["GitHubIntegration"]
+PrizolovAuditor = core_classes["PrizolovAuditor"]
+GitAnalyzer = core_classes["GitAnalyzer"]
+DependencyAnalyzer = core_classes["DependencyAnalyzer"]
+SemanticAI = core_classes["SemanticAI"]
+ScoringEngine = core_classes["ScoringEngine"]
+SmartTriage = core_classes["SmartTriage"]
+ContextualMentor = core_classes["ContextualMentor"]
+ROICalculator = core_classes["ROICalculator"]
+AuditTrail = core_classes["AuditTrail"]
+RepoPublisher = core_classes["RepoPublisher"]
+MultiLangAnalyzer = core_classes["MultiLangAnalyzer"]
+Leaderboard = core_classes["Leaderboard"]
 
 # ========== FastAPI ==========
 app = FastAPI(title="Repo Validator Agent")
@@ -130,7 +136,7 @@ app.add_middleware(
 # ========== ГЛОБАЛЬНЫЕ ХРАНИЛИЩА ==========
 SESSIONS: Dict[str, dict] = {}
 SAVINGS = {"fixed": 0, "hours": 0.0, "money": 0.0}
-LEADERBOARD = Leaderboard() if Leaderboard is not Stub else None
+LEADERBOARD = Leaderboard() if Leaderboard is not None else None
 
 # ========== МОДЕЛИ ==========
 class RepoRequest(BaseModel):
@@ -454,7 +460,7 @@ def run_analysis(session_id: str, repo_url: str):
         _save_audit_record(session_id, scanner.local_path, report_to_summary(report), scoring)
 
         # Обновляем лидерборд
-        if LEADERBOARD and LEADERBOARD is not Stub:
+        if LEADERBOARD is not None:
             primary_lang = "unknown"
             if semantic and not semantic.get("error") and semantic.get("code_purpose"):
                 techs = semantic["code_purpose"].get("key_technologies", [])
@@ -875,7 +881,7 @@ async def autonomous_fix(session_id: str, req: AutonomousFixRequest):
 
 @app.get("/leaderboard")
 async def get_leaderboard(sort_by: str = "repo_score", language: str = None, limit: int = 10):
-    if LEADERBOARD is None or LEADERBOARD is Stub:
+    if LEADERBOARD is None:
         return {"error": "Лидерборд временно недоступен"}
     return LEADERBOARD.get_top(limit=limit, sort_by=sort_by, language=language)
 
