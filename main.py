@@ -18,6 +18,7 @@ import shutil
 import zipfile
 import io
 import json
+import logging
 from typing import Dict, List, Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,28 +26,91 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, HttpUrl
 import requests
 
-from core.repository_scanner import RepositoryScanner
-from core.project_analyzer import ProjectAnalyzer
-from core.fix_engine import StepFixEngine
-from core.linter_runner import LinterRunner
-from core.ast_analyzer import ASTAnalyzer
-from core.full_file_rewriter import FullFileRewriter
-from core.copyright_manager import CopyrightManager
-from core.github_integration import GitHubIntegration
-from core.prizolov_audit import PrizolovAuditor
-from core.git_analyzer import GitAnalyzer
-from core.dependency_analyzer import DependencyAnalyzer
-from core.semantic_ai import SemanticAI
-from core.scoring_engine import ScoringEngine
-from core.smart_triage import SmartTriage
-from core.mentor import ContextualMentor
-from core.roi_calculator import ROICalculator
-from core.audit_trail import AuditTrail
-from core.repo_publisher import RepoPublisher
-from core.multi_lang_analyzer import MultiLangAnalyzer
-from core.leaderboard import Leaderboard        # <-- новый импорт
-from config import settings
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+# Импорт конфигурации (создайте config.py)
+try:
+    from config import settings
+except ImportError:
+    logger.warning("config.py не найден, использую значения по умолчанию")
+    settings = type("Settings", (), {})()
+    settings.app_name = "Prizolov Repo Validator"
+    settings.debug = False
+
+# ========== ЗАГРУЗКА МОДУЛЕЙ CORE С ЗАГЛУШКАМИ ==========
+core_modules = {}
+
+def safe_import(module_name, class_name):
+    try:
+        module = __import__(f"core.{module_name}", fromlist=[class_name])
+        return getattr(module, class_name)
+    except (ImportError, AttributeError) as e:
+        logger.warning(f"Не удалось импортировать {class_name} из core.{module_name}: {e}")
+        return None
+
+# Создаём классы-заглушки для отсутствующих модулей
+class Stub:
+    def __init__(self, name):
+        self.name = name
+    def __getattr__(self, item):
+        logger.warning(f"Вызов заглушки {self.name}.{item}")
+        return lambda *args, **kwargs: {}
+
+# Список необходимых классов
+required_classes = [
+    ("repository_scanner", "RepositoryScanner"),
+    ("project_analyzer", "ProjectAnalyzer"),
+    ("fix_engine", "StepFixEngine"),
+    ("linter_runner", "LinterRunner"),
+    ("ast_analyzer", "ASTAnalyzer"),
+    ("full_file_rewriter", "FullFileRewriter"),
+    ("copyright_manager", "CopyrightManager"),
+    ("github_integration", "GitHubIntegration"),
+    ("prizolov_audit", "PrizolovAuditor"),
+    ("git_analyzer", "GitAnalyzer"),
+    ("dependency_analyzer", "DependencyAnalyzer"),
+    ("semantic_ai", "SemanticAI"),
+    ("scoring_engine", "ScoringEngine"),
+    ("smart_triage", "SmartTriage"),
+    ("mentor", "ContextualMentor"),
+    ("roi_calculator", "ROICalculator"),
+    ("audit_trail", "AuditTrail"),
+    ("repo_publisher", "RepoPublisher"),
+    ("multi_lang_analyzer", "MultiLangAnalyzer"),
+    ("leaderboard", "Leaderboard")
+]
+
+for mod, cls in required_classes:
+    impl = safe_import(mod, cls)
+    if impl is None:
+        impl = Stub(cls)
+    core_modules[cls] = impl
+
+# Извлекаем классы в глобальное пространство
+RepositoryScanner = core_modules["RepositoryScanner"]
+ProjectAnalyzer = core_modules["ProjectAnalyzer"]
+StepFixEngine = core_modules["StepFixEngine"]
+LinterRunner = core_modules["LinterRunner"]
+ASTAnalyzer = core_modules["ASTAnalyzer"]
+FullFileRewriter = core_modules["FullFileRewriter"]
+CopyrightManager = core_modules["CopyrightManager"]
+GitHubIntegration = core_modules["GitHubIntegration"]
+PrizolovAuditor = core_modules["PrizolovAuditor"]
+GitAnalyzer = core_modules["GitAnalyzer"]
+DependencyAnalyzer = core_modules["DependencyAnalyzer"]
+SemanticAI = core_modules["SemanticAI"]
+ScoringEngine = core_modules["ScoringEngine"]
+SmartTriage = core_modules["SmartTriage"]
+ContextualMentor = core_modules["ContextualMentor"]
+ROICalculator = core_modules["ROICalculator"]
+AuditTrail = core_modules["AuditTrail"]
+RepoPublisher = core_modules["RepoPublisher"]
+MultiLangAnalyzer = core_modules["MultiLangAnalyzer"]
+Leaderboard = core_modules["Leaderboard"]
+
+# ========== FastAPI ==========
 app = FastAPI(title="Repo Validator Agent")
 
 # ----- CORS -----
@@ -55,7 +119,6 @@ origins = [
     "http://localhost",
     "http://127.0.0.1",
 ]
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -64,13 +127,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ========== ГЛОБАЛЬНЫЕ ХРАНИЛИЩА ==========
 SESSIONS: Dict[str, dict] = {}
-
 SAVINGS = {"fixed": 0, "hours": 0.0, "money": 0.0}
+LEADERBOARD = Leaderboard() if Leaderboard is not Stub else None
 
-# Глобальный лидерборд (в памяти)
-LEADERBOARD = Leaderboard()
-
+# ========== МОДЕЛИ ==========
 class RepoRequest(BaseModel):
     repo_url: HttpUrl
     branch: Optional[str] = None
@@ -91,7 +153,7 @@ class MentorRequest(BaseModel):
 
 class PublishRequest(BaseModel):
     github_token: str
-    action: str  # "issue" или "label"
+    action: str
 
 class CopyrightApplyRequest(BaseModel):
     copyright_text: Optional[str] = None
@@ -118,6 +180,7 @@ class SavingsUpdateRequest(BaseModel):
     hours: float = 0.0
     money: float = 0.0
 
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def create_components(repo_url: str):
     scanner = RepositoryScanner(repo_url)
     scanner.clone()
@@ -131,233 +194,102 @@ def create_components(repo_url: str):
         "full_rewriter": FullFileRewriter(),
         "step_fix_engine": StepFixEngine(),
         "progress": None,
-        "hallucination_shield": None,
-        "legal_officer": None,
     }
 
-def run_analysis(session_id: str, repo_url: str):
-    session = SESSIONS.get(session_id)
-    if not session:
-        return
-    session["status"] = "in_progress"
-    try:
-        comps = create_components(repo_url)
-        files = comps["files"]
-        project_analyzer = comps["project_analyzer"]
-        ast_analyzer = comps["ast_analyzer"]
-        linter = comps["linter_runner"]
-        scanner = comps["scanner"]
-
-        # ----- Git Analyzer -----
-        git_stats = None
-        try:
-            git_analyzer = GitAnalyzer(scanner.local_path)
-            git_stats = git_analyzer.analyze()
-        except Exception as e:
-            git_stats = {"error": str(e)}
-
-        # ----- Dependency Analyzer -----
-        dep_stats = None
-        try:
-            dep_analyzer = DependencyAnalyzer(scanner.local_path)
-            dep_stats = dep_analyzer.analyze()
-        except Exception as e:
-            dep_stats = {"error": str(e)}
-
-        # ----- Multi-Language Analyzer -----
-        multi_lang_issues = {}
-        try:
-            mla = MultiLangAnalyzer()
-            multi_lang_issues = mla.analyze(files)
-        except Exception as e:
-            multi_lang_issues = {"error": str(e)}
-
-        project_issues = project_analyzer.analyze(files)
-
-        ast_issues = {}
-        for path, content in files.items():
-            if path.endswith(".py"):
-                ast_issues[path] = ast_analyzer.analyze(content)
-
-        lint_issues = linter.run_all(files)
-
-        report = {
-            "project_issues": project_issues,
-            "ast_issues": ast_issues,
-            "lint_issues": lint_issues,
-            "multi_lang_issues": multi_lang_issues,
-        }
-
-        auditor = PrizolovAuditor()
-        audit_results = auditor.audit(files)
-        serialized_audit = {}
-        for level, issues in audit_results.items():
-            serialized_audit[level] = [
-                f"[{i.criticality.upper()}] {i.file}:{i.line} - {i.message}"
-                for i in issues
-            ]
-        report["audit"] = serialized_audit
-        report["git_stats"] = git_stats
-        report["dep_stats"] = dep_stats
-
-        # ----- Semantic AI Layer -----
-        semantic = None
-        try:
-            ai = SemanticAI()
-            context = report_to_summary(report)
-            hist_ctx = _get_audit_context(scanner.local_path)
-            if hist_ctx:
-                context = hist_ctx + "\n\n" + context
-            code_purpose = ai.analyze_code_purpose(context)
-            arch_eval = ai.evaluate_architecture(context)
-            risk_assessment = ai.assess_risk(context)
-            value_estimation = ai.estimate_value(context)
-            semantic = {
-                "code_purpose": code_purpose,
-                "architecture_evaluation": arch_eval,
-                "risk_assessment": risk_assessment,
-                "value_estimation": value_estimation,
-            }
-        except Exception as e:
-            semantic = {"error": f"Ошибка семантического анализа: {str(e)}"}
-
-        report["semantic"] = semantic
-
-        # ----- Scoring Engine -----
-        scoring = None
-        try:
-            engine = ScoringEngine()
-            scoring = engine.compute(report)
-        except Exception as e:
-            scoring = {"error": str(e)}
-
-        report["scoring"] = scoring
-
-        # ----- Smart Triage -----
-        triage = None
-        try:
-            triager = SmartTriage()
-            all_issues = []
-            if "audit" in report:
-                for issues in report["audit"].values():
-                    all_issues.extend(issues)
-            triage = triager.prioritize(all_issues)
-        except Exception as e:
-            triage = [{"issue": "Ошибка Smart Triage", "priority": 0, "reason": str(e), "effort": "?"}]
-
-        report["triage"] = triage
-
-        # ----- ROI Calculator -----
-        roi = None
-        try:
-            roi_calc = ROICalculator(hourly_rate=50.0)
-            roi = roi_calc.compute(report, scoring)
-        except Exception as e:
-            roi = {"error": f"Ошибка расчёта ROI: {str(e)}"}
-
-        report["roi"] = roi
-
-        # ----- Сохраняем скрытый аудит -----
-        _save_audit_record(session_id, scanner.local_path, report_to_summary(report), scoring)
-
-        # ----- Обновляем лидерборд -----
-        primary_lang = "unknown"
-        if semantic and not semantic.get("error") and semantic.get("code_purpose"):
-            techs = semantic["code_purpose"].get("key_technologies", [])
-            if isinstance(techs, list) and len(techs) > 0:
-                primary_lang = techs[0]  # первый в списке технологий
-
-        LEADERBOARD.add_result(repo_url, scoring, primary_lang)
-
-        session["report"] = report
-        session["status"] = "done"
-        session["files"] = files
-    except Exception as e:
-        session["status"] = "error"
-        session["error"] = str(e)
-
-def _get_audit_context(repo_path: str) -> str:
-    trail = AuditTrail(repo_path)
-    return trail.get_history_context()
-
-def _save_audit_record(session_id: str, repo_path: str, summary: str, scoring: Dict) -> None:
-    if not scoring or scoring.get("error"):
-        return
-    trail = AuditTrail(repo_path)
-    trail.save(session_id, summary, scoring)
-
 def report_to_summary(report: dict) -> str:
+    """Безопасное формирование текстового отчёта"""
     lines = []
+    # Проектные проблемы
     if report.get("project_issues"):
         lines.append("Проблемы проекта:\n" + "\n".join(report["project_issues"]))
+    # AST проблемы
     if report.get("ast_issues"):
         for f, issues in report["ast_issues"].items():
             if issues:
                 lines.append(f"AST ({f}):\n" + "\n".join(issues))
+    # Линтеры
     if report.get("lint_issues"):
         for f, issues in report["lint_issues"].items():
             if issues:
                 lines.append(f"Линтеры ({f}):\n" + "\n".join(issues))
+    # Мультиязычный анализ
     if report.get("multi_lang_issues"):
         for f, issues in report["multi_lang_issues"].items():
             if issues:
                 lines.append(f"Мультиязычный анализ ({f}):\n" + "\n".join(issues))
+    # Аудит Prizolov
     if report.get("audit"):
-        level_names = {
-            "architecture": "Архитектура",
-            "security": "Безопасность",
-            "performance": "Производительность",
-            "documentation": "Документированность"
-        }
+        level_names = {"architecture": "Архитектура", "security": "Безопасность",
+                       "performance": "Производительность", "documentation": "Документированность"}
         for level, issues in report["audit"].items():
             if issues:
                 lines.append(f"Аудит {level_names.get(level, level)}:\n" + "\n".join(issues))
-    if report.get("git_stats") and not report["git_stats"].get("error"):
-        gs = report["git_stats"]
+    # Git статистика
+    git_stats = report.get("git_stats")
+    if git_stats and isinstance(git_stats, dict) and not git_stats.get("error"):
         lines.append(
             f"Git активность:\n"
-            f"- Коммитов: {gs['total_commits']}\n"
-            f"- Контрибьюторов: {gs['contributors_count']}\n"
-            f"- Активность: {'активен' if gs['is_active'] else 'заброшен'}\n"
-            f"- Последний коммит: {gs['last_commit']}"
+            f"- Коммитов: {git_stats.get('total_commits', '?')}\n"
+            f"- Контрибьюторов: {git_stats.get('contributors_count', '?')}\n"
+            f"- Активность: {'активен' if git_stats.get('is_active') else 'заброшен'}\n"
+            f"- Последний коммит: {git_stats.get('last_commit', '?')}"
         )
-    if report.get("dep_stats"):
-        ds = report["dep_stats"]
-        if isinstance(ds, dict):
-            if ds.get("vulnerabilities"):
-                lines.append(f"Найдены уязвимости в зависимостях: {len(ds['vulnerabilities'])}")
-            if ds.get("licenses"):
-                lines.append(f"Лицензий проанализировано: {len(ds['licenses'])}")
-    if report.get("semantic") and not report["semantic"].get("error"):
-        sem = report["semantic"]
-        if sem.get("code_purpose"):
-            cp = sem["code_purpose"]
+    # Зависимости
+    dep_stats = report.get("dep_stats")
+    if dep_stats and isinstance(dep_stats, dict):
+        if dep_stats.get("vulnerabilities"):
+            lines.append(f"Найдены уязвимости в зависимостях: {len(dep_stats['vulnerabilities'])}")
+        if dep_stats.get("licenses"):
+            lines.append(f"Лицензий проанализировано: {len(dep_stats['licenses'])}")
+    # Семантический AI
+    semantic = report.get("semantic")
+    if semantic and isinstance(semantic, dict) and not semantic.get("error"):
+        cp = semantic.get("code_purpose")
+        if cp:
             lines.append(
                 f"Семантический анализ:\n"
                 f"- Тип проекта: {cp.get('project_type', 'неизвестен')}\n"
                 f"- Назначение: {cp.get('description', '')[:200]}..."
             )
-    if report.get("scoring") and not report["scoring"].get("error"):
-        sc = report["scoring"]
+    # Скоринг
+    scoring = report.get("scoring")
+    if scoring and isinstance(scoring, dict) and not scoring.get("error"):
         lines.append(
             f"Scoring:\n"
-            f"Repo Score: {sc['repo_score']}/100\n"
-            f"Risk Score: {sc['risk_score']}/100\n"
-            f"Readiness: {sc['readiness']}%\n"
-            f"Tech Debt: {sc['tech_debt_hours']}h (${sc['tech_debt_money']})"
+            f"Repo Score: {scoring.get('repo_score', '?')}/100\n"
+            f"Risk Score: {scoring.get('risk_score', '?')}/100\n"
+            f"Readiness: {scoring.get('readiness', '?')}%\n"
+            f"Tech Debt: {scoring.get('tech_debt_hours', '?')}h (${scoring.get('tech_debt_money', '?')})"
         )
-    if report.get("roi") and not report["roi"].get("error"):
-        r = report["roi"]
+    # ROI
+    roi = report.get("roi")
+    if roi and isinstance(roi, dict) and not roi.get("error"):
         lines.append(
             f"ROI:\n"
-            f"Стоимость техдолга: ${r.get('tech_debt_cost', 0)}\n"
-            f"Потенциальная экономия: ${r.get('potential_savings', 0)}\n"
-            f"ROI: {r.get('roi_percent', 0)}%\n"
-            f"Влияние на бизнес: {r.get('business_impact', '')}"
+            f"Стоимость техдолга: ${roi.get('tech_debt_cost', 0)}\n"
+            f"Потенциальная экономия: ${roi.get('potential_savings', 0)}\n"
+            f"ROI: {roi.get('roi_percent', 0)}%\n"
+            f"Влияние на бизнес: {roi.get('business_impact', '')}"
         )
     return "\n\n".join(lines) or "Проблем не найдено"
 
-# ----- YANDEX GPT HELPER -----
+def _get_audit_context(repo_path: str) -> str:
+    try:
+        trail = AuditTrail(repo_path)
+        return trail.get_history_context()
+    except Exception as e:
+        logger.warning(f"Ошибка получения контекста аудита: {e}")
+        return ""
+
+def _save_audit_record(session_id: str, repo_path: str, summary: str, scoring: Dict) -> None:
+    if not scoring or scoring.get("error"):
+        return
+    try:
+        trail = AuditTrail(repo_path)
+        trail.save(session_id, summary, scoring)
+    except Exception as e:
+        logger.warning(f"Ошибка сохранения аудита: {e}")
+
 def query_yandex_gpt(prompt: str, context: str = "", max_tokens: int = 2000) -> str:
     api_key = os.getenv("YANDEX_API_KEY")
     if not api_key:
@@ -393,9 +325,156 @@ def query_yandex_gpt(prompt: str, context: str = "", max_tokens: int = 2000) -> 
         else:
             return "Модель не вернула ответ."
     except Exception as e:
+        logger.error(f"Ошибка YandexGPT: {e}")
         return f"Ошибка при обращении к YandexGPT: {str(e)}"
 
-# ----- ЭНДПОИНТЫ -----
+def run_analysis(session_id: str, repo_url: str):
+    session = SESSIONS.get(session_id)
+    if not session:
+        return
+    session["status"] = "in_progress"
+    scanner = None
+    try:
+        comps = create_components(repo_url)
+        scanner = comps["scanner"]
+        files = comps["files"]
+        project_analyzer = comps["project_analyzer"]
+        ast_analyzer = comps["ast_analyzer"]
+        linter = comps["linter_runner"]
+
+        # ----- Git Analyzer -----
+        git_stats = None
+        try:
+            git_analyzer = GitAnalyzer(scanner.local_path)
+            git_stats = git_analyzer.analyze()
+        except Exception as e:
+            git_stats = {"error": str(e)}
+
+        # ----- Dependency Analyzer -----
+        dep_stats = None
+        try:
+            dep_analyzer = DependencyAnalyzer(scanner.local_path)
+            dep_stats = dep_analyzer.analyze()
+        except Exception as e:
+            dep_stats = {"error": str(e)}
+
+        # ----- Multi-Language Analyzer -----
+        multi_lang_issues = {}
+        try:
+            mla = MultiLangAnalyzer()
+            multi_lang_issues = mla.analyze(files)
+        except Exception as e:
+            multi_lang_issues = {"error": str(e)}
+
+        project_issues = project_analyzer.analyze(files)
+        ast_issues = {}
+        for path, content in files.items():
+            if path.endswith(".py"):
+                ast_issues[path] = ast_analyzer.analyze(content)
+        lint_issues = linter.run_all(files)
+
+        report = {
+            "project_issues": project_issues,
+            "ast_issues": ast_issues,
+            "lint_issues": lint_issues,
+            "multi_lang_issues": multi_lang_issues,
+        }
+
+        # Аудит Prizolov
+        try:
+            auditor = PrizolovAuditor()
+            audit_results = auditor.audit(files)
+            serialized_audit = {}
+            for level, issues in audit_results.items():
+                serialized_audit[level] = [
+                    f"[{i.criticality.upper()}] {i.file}:{i.line} - {i.message}"
+                    for i in issues
+                ]
+            report["audit"] = serialized_audit
+        except Exception as e:
+            report["audit"] = {"error": str(e)}
+
+        report["git_stats"] = git_stats
+        report["dep_stats"] = dep_stats
+
+        # Semantic AI
+        semantic = None
+        try:
+            ai = SemanticAI()
+            context = report_to_summary(report)
+            hist_ctx = _get_audit_context(scanner.local_path)
+            if hist_ctx:
+                context = hist_ctx + "\n\n" + context
+            code_purpose = ai.analyze_code_purpose(context)
+            arch_eval = ai.evaluate_architecture(context)
+            risk_assessment = ai.assess_risk(context)
+            value_estimation = ai.estimate_value(context)
+            semantic = {
+                "code_purpose": code_purpose,
+                "architecture_evaluation": arch_eval,
+                "risk_assessment": risk_assessment,
+                "value_estimation": value_estimation,
+            }
+        except Exception as e:
+            semantic = {"error": f"Ошибка семантического анализа: {str(e)}"}
+        report["semantic"] = semantic
+
+        # Scoring Engine
+        scoring = None
+        try:
+            engine = ScoringEngine()
+            scoring = engine.compute(report)
+        except Exception as e:
+            scoring = {"error": str(e)}
+        report["scoring"] = scoring
+
+        # Smart Triage
+        triage = None
+        try:
+            triager = SmartTriage()
+            all_issues = []
+            if "audit" in report:
+                for issues in report["audit"].values():
+                    all_issues.extend(issues)
+            triage = triager.prioritize(all_issues)
+        except Exception as e:
+            triage = [{"issue": "Ошибка Smart Triage", "priority": 0, "reason": str(e), "effort": "?"}]
+        report["triage"] = triage
+
+        # ROI Calculator
+        roi = None
+        try:
+            roi_calc = ROICalculator(hourly_rate=50.0)
+            roi = roi_calc.compute(report, scoring)
+        except Exception as e:
+            roi = {"error": f"Ошибка расчёта ROI: {str(e)}"}
+        report["roi"] = roi
+
+        # Сохраняем аудит
+        _save_audit_record(session_id, scanner.local_path, report_to_summary(report), scoring)
+
+        # Обновляем лидерборд
+        if LEADERBOARD and LEADERBOARD is not Stub:
+            primary_lang = "unknown"
+            if semantic and not semantic.get("error") and semantic.get("code_purpose"):
+                techs = semantic["code_purpose"].get("key_technologies", [])
+                if techs:
+                    primary_lang = techs[0]
+            LEADERBOARD.add_result(repo_url, scoring, primary_lang)
+
+        session["report"] = report
+        session["status"] = "done"
+        session["files"] = files
+    except Exception as e:
+        logger.exception("Ошибка в run_analysis")
+        session["status"] = "error"
+        session["error"] = str(e)
+    finally:
+        # Очистка временной папки
+        if scanner and hasattr(scanner, 'local_path') and os.path.exists(scanner.local_path):
+            shutil.rmtree(scanner.local_path, ignore_errors=True)
+
+# ========== ЭНДПОИНТЫ ==========
 @app.post("/scan")
 async def start_scan(request: RepoRequest, background_tasks: BackgroundTasks):
     session_id = str(uuid.uuid4())
@@ -416,7 +495,7 @@ async def get_status(session_id: str):
     if session["status"] == "done":
         resp["report"] = session["report"]
     elif session["status"] == "error":
-        resp["error"] = session["error"]
+        resp["error"] = session.get("error", "Неизвестная ошибка")
     return resp
 
 @app.get("/report/{session_id}")
@@ -447,9 +526,9 @@ async def get_changes(session_id: str):
 async def apply_fixes(session_id: str):
     session = SESSIONS.get(session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Сессия не найдена")
+        raise HTTPException(404, "Сессия не найдена")
     if session.get("status") != "done":
-        raise HTTPException(status_code=400, detail="Отчёт ещё не готов")
+        raise HTTPException(400, "Отчёт ещё не готов")
 
     engine = StepFixEngine()
     files = session.get("files", {})
@@ -470,7 +549,7 @@ async def apply_fixes(session_id: str):
         media_type="application/zip",
         headers={
             "Content-Disposition": f"attachment; filename=repo_{session_id}_fixed.zip",
-            "X-Fixed-Files": ",".join(engine.fixes_applied)
+            "X-Fixed-Files": ",".join(getattr(engine, 'fixes_applied', []))
         }
     )
 
@@ -580,15 +659,18 @@ async def chat_advisor(session_id: str, req: AdvisorChatRequest):
     session = SESSIONS.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
-
     context = ""
     if session.get("report"):
         context = report_to_summary(session["report"])
-        scanner = RepositoryScanner(session["repo_url"])
-        scanner.clone()
-        hist_ctx = _get_audit_context(scanner.local_path)
-        if hist_ctx:
-            context = hist_ctx + "\n\n" + context
+        try:
+            scanner = RepositoryScanner(session["repo_url"])
+            scanner.clone()
+            hist_ctx = _get_audit_context(scanner.local_path)
+            if hist_ctx:
+                context = hist_ctx + "\n\n" + context
+            shutil.rmtree(scanner.local_path, ignore_errors=True)
+        except Exception as e:
+            logger.warning(f"Ошибка получения контекста: {e}")
 
     system_prompt = ROLE_PROMPTS.get(req.role, ROLE_PROMPTS["analyst"])
     prompt = f"{system_prompt}\n\nКонтекст отчёта:\n{context}\n\nВопрос пользователя: {req.message}"
@@ -628,19 +710,17 @@ async def chat_advisor(session_id: str, req: AdvisorChatRequest):
         else:
             return {"reply": "Модель не вернула ответ."}
     except Exception as e:
+        logger.error(f"Ошибка в /chat/advisor: {e}")
         return {"reply": f"Ошибка при обращении к YandexGPT: {str(e)}"}
 
-# ===== АРБИТРАЖ =====
 @app.post("/chat/arbitrage/{session_id}")
 async def chat_arbitrage(session_id: str, req: ArbitrageRequest):
     session = SESSIONS.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
-
     context = ""
     if session.get("report"):
         context = report_to_summary(session["report"])
-
     prompt = (
         "Предложи два конкретных варианта исправления следующей проблемы в коде. "
         "Первый вариант — с точки зрения архитектора (минимизация зависимостей, улучшение структуры). "
@@ -651,7 +731,6 @@ async def chat_arbitrage(session_id: str, req: ArbitrageRequest):
         f"Проблема: {req.message}\n"
         f"Контекст отчёта:\n{context}"
     )
-
     api_key = os.getenv("YANDEX_API_KEY")
     if not api_key:
         return {"architect": "Ошибка: не настроен API-ключ", "security": "Ошибка: не настроен API-ключ"}
@@ -661,7 +740,6 @@ async def chat_arbitrage(session_id: str, req: ArbitrageRequest):
         "Authorization": f"Api-Key {api_key}",
         "Content-Type": "application/json"
     }
-
     payload = {
         "modelUri": f"gpt://{folder_id}/yandexgpt-lite",
         "completionOptions": {
@@ -699,20 +777,18 @@ async def chat_arbitrage(session_id: str, req: ArbitrageRequest):
                 security += " " + line.strip()
         return {"architect": architect.strip() or "Нет ответа", "security": security.strip() or "Нет ответа"}
     except Exception as e:
+        logger.error(f"Ошибка в /chat/arbitrage: {e}")
         return {"architect": f"Ошибка: {str(e)}", "security": f"Ошибка: {str(e)}"}
 
-# ===== КОНТЕКСТНЫЙ МЕНТОР =====
 @app.post("/chat/mentor/{session_id}")
 async def chat_mentor(session_id: str, req: MentorRequest):
     session = SESSIONS.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
-
     mentor = ContextualMentor()
     suggestion = mentor.suggest_fix(req.issue, req.file_context)
     return {"reply": suggestion}
 
-# ===== ПУБЛИКАЦИЯ В РЕПОЗИТОРИЙ =====
 @app.post("/publish/{session_id}")
 async def publish_results(session_id: str, req: PublishRequest):
     session = SESSIONS.get(session_id)
@@ -720,26 +796,20 @@ async def publish_results(session_id: str, req: PublishRequest):
         raise HTTPException(404, "Сессия не найдена")
     if session.get("status") != "done":
         raise HTTPException(400, "Отчёт ещё не готов")
-
     report = session.get("report", {})
     summary = report_to_summary(report)
     publisher = RepoPublisher(req.github_token)
     repo_url = session["repo_url"]
-
     scoring = report.get("scoring", {})
     repo_score_before = scoring.get("repo_score", 0)
-    repo_score_after = repo_score_before
-
     body = (
         f"## 🤖 Отчёт Repo Validator\n\n"
         f"**Проверка выполнена:** {repo_url}\n"
         f"**Агент:** Prizolov Repo Validator (автор: Dm.Andreyanov)\n"
         f"**Дата проверки:** {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-        f"**Оценка до оптимизации:** {repo_score_before}/100\n"
-        f"**Оценка после оптимизации:** {repo_score_after}/100\n\n"
+        f"**Оценка:** {repo_score_before}/100\n\n"
         f"### Полный отчёт\n```\n{summary}\n```"
     )
-
     if req.action == "issue":
         title = "🤖 Repo Validator: проверка кода"
         issue_url = publisher.publish_issue(repo_url, title, body)
@@ -749,7 +819,7 @@ async def publish_results(session_id: str, req: PublishRequest):
             raise HTTPException(500, "Не удалось создать Issue.")
     elif req.action == "label":
         label_name = f"repo-score-{int(repo_score_before)}"
-        description = f"Repo Score: {repo_score_before}/100 (проверено агентом Dm.Andreyanov)"
+        description = f"Repo Score: {repo_score_before}/100 (проверено агентом)"
         if repo_score_before >= 80:
             color = "0e8a16"
         elif repo_score_before >= 60:
@@ -764,7 +834,6 @@ async def publish_results(session_id: str, req: PublishRequest):
     else:
         raise HTTPException(400, "Неверный action. Допустимые значения: 'issue', 'label'.")
 
-# ===== АВТОНОМНЫЙ ПАЙПЛАЙН =====
 @app.post("/autonomous-fix/{session_id}")
 async def autonomous_fix(session_id: str, req: AutonomousFixRequest):
     session = SESSIONS.get(session_id)
@@ -772,15 +841,11 @@ async def autonomous_fix(session_id: str, req: AutonomousFixRequest):
         raise HTTPException(404, "Сессия не найдена")
     if session.get("status") != "done":
         raise HTTPException(400, "Отчёт ещё не готов")
-
-    # 1. Автофиксы
     engine = StepFixEngine()
     files = session.get("files", {})
     if not files:
         raise HTTPException(500, "Нет файлов для обработки")
     new_files = engine.format_all(files)
-
-    # 2. Копирайт (опционально)
     if req.apply_copyright:
         mgr = CopyrightManager()
         new_files = mgr.apply_copyright(
@@ -790,10 +855,7 @@ async def autonomous_fix(session_id: str, req: AutonomousFixRequest):
             product=req.copyright_product,
             skip_existing=True
         )
-
     session["fixed_files"] = new_files
-
-    # 3. Создание PR
     github = GitHubIntegration(req.github_token)
     summary = report_to_summary(session.get("report", {}))
     body = f"## Автономный Fix Repo Validator\n```\n{summary}\n```"
@@ -811,12 +873,12 @@ async def autonomous_fix(session_id: str, req: AutonomousFixRequest):
     except Exception as e:
         raise HTTPException(500, f"Ошибка при создании PR: {str(e)}")
 
-# ===== ЛИДЕРБОРД =====
 @app.get("/leaderboard")
 async def get_leaderboard(sort_by: str = "repo_score", language: str = None, limit: int = 10):
+    if LEADERBOARD is None or LEADERBOARD is Stub:
+        return {"error": "Лидерборд временно недоступен"}
     return LEADERBOARD.get_top(limit=limit, sort_by=sort_by, language=language)
 
-# ----- ОБЫЧНЫЙ ЧАТ -----
 @app.post("/chat/{session_id}")
 async def chat(session_id: str, req: ChatRequest):
     session = SESSIONS.get(session_id)
@@ -825,15 +887,18 @@ async def chat(session_id: str, req: ChatRequest):
     context = ""
     if session.get("report"):
         context = report_to_summary(session["report"])
-        scanner = RepositoryScanner(session["repo_url"])
-        scanner.clone()
-        hist_ctx = _get_audit_context(scanner.local_path)
-        if hist_ctx:
-            context = hist_ctx + "\n\n" + context
+        try:
+            scanner = RepositoryScanner(session["repo_url"])
+            scanner.clone()
+            hist_ctx = _get_audit_context(scanner.local_path)
+            if hist_ctx:
+                context = hist_ctx + "\n\n" + context
+            shutil.rmtree(scanner.local_path, ignore_errors=True)
+        except Exception as e:
+            logger.warning(f"Ошибка получения контекста: {e}")
     reply = query_yandex_gpt(req.message, context)
     return {"reply": reply}
 
-# ----- СКАЧИВАНИЕ ZIP -----
 @app.get("/download/{session_id}")
 async def download_repo(session_id: str):
     session = SESSIONS.get(session_id)
@@ -841,10 +906,13 @@ async def download_repo(session_id: str):
         raise HTTPException(status_code=404, detail="Сессия не найдена")
     files = session.get("fixed_files") or session.get("files", {})
     if not files:
-        scanner = RepositoryScanner(session["repo_url"])
-        scanner.clone()
-        files = scanner.scan_repository()
-
+        try:
+            scanner = RepositoryScanner(session["repo_url"])
+            scanner.clone()
+            files = scanner.scan_repository()
+            shutil.rmtree(scanner.local_path, ignore_errors=True)
+        except Exception as e:
+            raise HTTPException(500, f"Не удалось получить файлы: {e}")
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for path, content in files.items():
@@ -856,7 +924,6 @@ async def download_repo(session_id: str):
         headers={"Content-Disposition": f"attachment; filename=repo_{session_id}.zip"}
     )
 
-# ===== ГЛОБАЛЬНЫЕ НАКОПЛЕНИЯ =====
 @app.get("/savings")
 async def get_savings():
     return SAVINGS
