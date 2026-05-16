@@ -5,19 +5,88 @@
 # Organization: Prizolov Market / Prizolov Lab
 # ============================================
 
+import asyncio
 import subprocess
 import tempfile
 import os
+from typing import Dict, List, Tuple
 
 class LinterRunner:
-    """Запускает линтеры flake8 и bandit на переданных файлах."""
+    """Запускает линтеры параллельно на переданных файлах с использованием asyncio."""
 
-    def run_all(self, files: dict) -> dict:
+    async def _run_linter_async(self, cmd: List[str], cwd: str, timeout: int = 30) -> Tuple[str, str, str]:
         """
+        Асинхронно запускает команду и возвращает (stdout, stderr, error_message).
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            stdout = stdout.decode('utf-8', errors='replace')
+            stderr = stderr.decode('utf-8', errors='replace')
+            return stdout, stderr, None
+        except asyncio.TimeoutError:
+            return "", "", f"Timeout after {timeout}s"
+        except Exception as e:
+            return "", "", str(e)
+
+    def _parse_flake8_output(self, output: str, cwd: str) -> List[Tuple[str, str]]:
+        """Парсит вывод flake8 в список (относительный_путь, сообщение)."""
+        issues = []
+        for line in output.splitlines():
+            parts = line.split(':', 3)
+            if len(parts) >= 4:
+                full_path = parts[0]
+                try:
+                    rel_path = os.path.relpath(full_path, cwd)
+                except ValueError:
+                    rel_path = full_path
+                msg = parts[3].strip()
+                issues.append((rel_path, f"[flake8] {msg}"))
+        return issues
+
+    def _parse_bandit_output(self, output: str, cwd: str) -> List[Tuple[str, str]]:
+        """Парсит вывод bandit."""
+        issues = []
+        for line in output.splitlines():
+            if ':' in line:
+                parts = line.split(':', 1)
+                full_path = parts[0].strip()
+                try:
+                    rel_path = os.path.relpath(full_path, cwd)
+                except ValueError:
+                    rel_path = full_path
+                msg = parts[1].strip()
+                issues.append((rel_path, f"[bandit] {msg}"))
+        return issues
+
+    def _parse_eslint_output(self, output: str, cwd: str) -> List[Tuple[str, str]]:
+        """Парсит вывод ESLint в формате --format=compact."""
+        issues = []
+        for line in output.splitlines():
+            if ':' in line and 'warning' in line or 'error' in line:
+                parts = line.split(':', 3)
+                if len(parts) >= 4:
+                    full_path = parts[0]
+                    try:
+                        rel_path = os.path.relpath(full_path, cwd)
+                    except ValueError:
+                        rel_path = full_path
+                    msg = parts[3].strip()
+                    issues.append((rel_path, f"[eslint] {msg}"))
+        return issues
+
+    async def run_all_async(self, files: Dict[str, str]) -> Dict[str, List[str]]:
+        """
+        Асинхронно запускает линтеры параллельно.
         files: словарь {относительный_путь: содержимое}
         Возвращает: {путь: [список строк с ошибками]}
         """
-        results = {}
+        results: Dict[str, List[str]] = {}
         with tempfile.TemporaryDirectory() as tmpdir:
             # Сохраняем все файлы во временную папку
             for path, content in files.items():
@@ -26,52 +95,66 @@ class LinterRunner:
                 with open(full_path, 'w', encoding='utf-8') as f:
                     f.write(content)
 
-            # Запускаем flake8
-            flake8_issues = self._run_flake8(tmpdir)
-            # Запускаем bandit
-            bandit_issues = self._run_bandit(tmpdir)
+            # Определяем команды линтеров, которые хотим запустить параллельно
+            lint_tasks = []
+            # flake8 для Python
+            if any(path.endswith('.py') for path in files):
+                lint_tasks.append(self._run_linter_async(['flake8', '--max-line-length=120', tmpdir], tmpdir))
+            # bandit для Python (безопасность)
+            if any(path.endswith('.py') for path in files):
+                lint_tasks.append(self._run_linter_async(['bandit', '-r', tmpdir, '-f', 'custom', '--msg-template', '{path}: {msg}'], tmpdir))
+            # ESLint для JavaScript/TypeScript (если установлен глобально или локально)
+            js_files = [p for p in files if p.endswith(('.js', '.ts', '.jsx', '.tsx'))]
+            if js_files:
+                try:
+                    # проверяем доступность eslint
+                    subprocess.run(['eslint', '--version'], capture_output=True, check=True)
+                    lint_tasks.append(self._run_linter_async(['eslint', '--format=compact', tmpdir], tmpdir))
+                except (subprocess.SubprocessError, FileNotFoundError):
+                    pass  # eslint не установлен, пропускаем
 
-            # Собираем результаты по файлам
-            for issue_list, source in [(flake8_issues, 'flake8'), (bandit_issues, 'bandit')]:
-                for path, msg in issue_list:
-                    rel_path = os.path.relpath(path, tmpdir)
-                    if rel_path not in results:
-                        results[rel_path] = []
-                    results[rel_path].append(f"[{source}] {msg}")
+            # Запускаем все задачи параллельно
+            outputs = await asyncio.gather(*lint_tasks, return_exceptions=True)
+
+            # Обрабатываем результаты
+            for idx, out in enumerate(outputs):
+                if isinstance(out, Exception):
+                    continue  # или логировать
+                stdout, stderr, err_msg = out
+                if err_msg:
+                    continue
+                # Определяем, какой линтер вернул вывод
+                if stdout:
+                    # Пытаемся распарсить в зависимости от содержимого (простой эвристикой)
+                    if 'flake8' in str(lint_tasks[idx]):
+                        parsed = self._parse_flake8_output(stdout, tmpdir)
+                    elif 'bandit' in str(lint_tasks[idx]):
+                        parsed = self._parse_bandit_output(stdout, tmpdir)
+                    elif 'eslint' in str(lint_tasks[idx]):
+                        parsed = self._parse_eslint_output(stdout, tmpdir)
+                    else:
+                        parsed = []
+                    for rel_path, msg in parsed:
+                        if rel_path not in results:
+                            results[rel_path] = []
+                        results[rel_path].append(msg)
 
         return results
 
-    def _run_flake8(self, directory: str) -> list:
-        """Возвращает список (full_path, error_message)."""
+    def run_all(self, files: Dict[str, str]) -> Dict[str, List[str]]:
+        """
+        Синхронная обёртка для вызова из существующего кода.
+        Запускает асинхронную версию в цикле asyncio.
+        """
         try:
-            proc = subprocess.run(
-                ['flake8', '--max-line-length=120', directory],
-                capture_output=True, text=True, timeout=30
-            )
-            issues = []
-            for line in proc.stdout.splitlines():
-                # Формат: path:line:col: error_code message
-                parts = line.split(':', 3)
-                if len(parts) >= 4:
-                    path = parts[0]
-                    msg = parts[3].strip()
-                    issues.append((path, msg))
-            return issues
-        except Exception as e:
-            return [(directory, f'flake8 error: {e}')]
-
-    def _run_bandit(self, directory: str) -> list:
-        """Возвращает список (full_path, error_message)."""
-        try:
-            proc = subprocess.run(
-                ['bandit', '-r', directory, '-f', 'custom', '--msg-template', '{path}: {msg}'],
-                capture_output=True, text=True, timeout=30
-            )
-            issues = []
-            for line in proc.stdout.splitlines():
-                if ':' in line:
-                    path, msg = line.split(':', 1)
-                    issues.append((path.strip(), msg.strip()))
-            return issues
-        except Exception as e:
-            return [(directory, f'bandit error: {e}')]
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop and loop.is_running():
+            # Если уже есть запущенный цикл, создаём новую задачу
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, self.run_all_async(files))
+                return future.result()
+        else:
+            return asyncio.run(self.run_all_async(files))
