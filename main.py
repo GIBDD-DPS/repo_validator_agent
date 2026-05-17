@@ -32,7 +32,7 @@ import requests
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Импорт конфигурации
+# Импорт конфигурации (создайте config.py)
 try:
     from config import settings
 except ImportError:
@@ -40,21 +40,6 @@ except ImportError:
     settings = type("Settings", (), {})()
     settings.app_name = "Prizolov Repo Validator"
     settings.debug = False
-    settings.redis_host = "localhost"
-    settings.redis_port = 6379
-    settings.redis_db = 0
-    settings.redis_password = ""
-    settings.cache_ttl_seconds = 7 * 24 * 3600
-
-# Импорт менеджера кэша
-try:
-    from core.cache_manager import CacheManager
-    cache_manager = CacheManager()
-    CACHE_AVAILABLE = True
-except ImportError:
-    logger.warning("CacheManager не доступен, кэширование отключено")
-    cache_manager = None
-    CACHE_AVAILABLE = False
 
 # ========== ФУНКЦИЯ СОЗДАНИЯ КЛАССОВ-ЗАГЛУШЕК ==========
 def make_stub_class(name: str):
@@ -133,6 +118,9 @@ RepoPublisher = core_classes["RepoPublisher"]
 MultiLangAnalyzer = core_classes["MultiLangAnalyzer"]
 Leaderboard = core_classes["Leaderboard"]
 
+# ========== Импорт кэш-менеджера ==========
+from core.cache_manager import CacheManager
+
 # ========== FastAPI ==========
 app = FastAPI(title="Repo Validator Agent")
 
@@ -154,6 +142,7 @@ app.add_middleware(
 SESSIONS: Dict[str, dict] = {}
 SAVINGS = {"fixed": 0, "hours": 0.0, "money": 0.0}
 LEADERBOARD = Leaderboard() if Leaderboard is not None else None
+cache_manager = CacheManager()   # <-- НОВОЕ
 
 # ========== МОДЕЛИ ==========
 class RepoRequest(BaseModel):
@@ -204,19 +193,6 @@ class SavingsUpdateRequest(BaseModel):
     money: float = 0.0
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
-def get_commit_sha(repo_url: str) -> Optional[str]:
-    """Получает SHA последнего коммита через git ls-remote."""
-    try:
-        result = subprocess.run(
-            ["git", "ls-remote", repo_url, "HEAD"],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0 and result.stdout:
-            return result.stdout.split()[0]
-    except Exception as e:
-        logger.warning(f"Не удалось получить SHA для {repo_url}: {e}")
-    return None
-
 def create_components(repo_url: str):
     scanner = RepositoryScanner(repo_url)
     scanner.clone()
@@ -235,26 +211,32 @@ def create_components(repo_url: str):
 def report_to_summary(report: dict) -> str:
     """Безопасное формирование текстового отчёта"""
     lines = []
+    # Проектные проблемы
     if report.get("project_issues"):
         lines.append("Проблемы проекта:\n" + "\n".join(report["project_issues"]))
+    # AST проблемы
     if report.get("ast_issues"):
         for f, issues in report["ast_issues"].items():
             if issues:
                 lines.append(f"AST ({f}):\n" + "\n".join(issues))
+    # Линтеры
     if report.get("lint_issues"):
         for f, issues in report["lint_issues"].items():
             if issues:
                 lines.append(f"Линтеры ({f}):\n" + "\n".join(issues))
+    # Мультиязычный анализ
     if report.get("multi_lang_issues"):
         for f, issues in report["multi_lang_issues"].items():
             if issues:
                 lines.append(f"Мультиязычный анализ ({f}):\n" + "\n".join(issues))
+    # Аудит Prizolov
     if report.get("audit"):
         level_names = {"architecture": "Архитектура", "security": "Безопасность",
                        "performance": "Производительность", "documentation": "Документированность"}
         for level, issues in report["audit"].items():
             if issues:
                 lines.append(f"Аудит {level_names.get(level, level)}:\n" + "\n".join(issues))
+    # Git статистика
     git_stats = report.get("git_stats")
     if git_stats and isinstance(git_stats, dict) and not git_stats.get("error"):
         lines.append(
@@ -264,12 +246,14 @@ def report_to_summary(report: dict) -> str:
             f"- Активность: {'активен' if git_stats.get('is_active') else 'заброшен'}\n"
             f"- Последний коммит: {git_stats.get('last_commit', '?')}"
         )
+    # Зависимости
     dep_stats = report.get("dep_stats")
     if dep_stats and isinstance(dep_stats, dict):
         if dep_stats.get("vulnerabilities"):
             lines.append(f"Найдены уязвимости в зависимостях: {len(dep_stats['vulnerabilities'])}")
         if dep_stats.get("licenses"):
             lines.append(f"Лицензий проанализировано: {len(dep_stats['licenses'])}")
+    # Семантический AI
     semantic = report.get("semantic")
     if semantic and isinstance(semantic, dict) and not semantic.get("error"):
         cp = semantic.get("code_purpose")
@@ -279,6 +263,7 @@ def report_to_summary(report: dict) -> str:
                 f"- Тип проекта: {cp.get('project_type', 'неизвестен')}\n"
                 f"- Назначение: {cp.get('description', '')[:200]}..."
             )
+    # Скоринг
     scoring = report.get("scoring")
     if scoring and isinstance(scoring, dict) and not scoring.get("error"):
         lines.append(
@@ -288,6 +273,7 @@ def report_to_summary(report: dict) -> str:
             f"Readiness: {scoring.get('readiness', '?')}%\n"
             f"Tech Debt: {scoring.get('tech_debt_hours', '?')}h (${scoring.get('tech_debt_money', '?')})"
         )
+    # ROI
     roi = report.get("roi")
     if roi and isinstance(roi, dict) and not roi.get("error"):
         lines.append(
@@ -354,237 +340,158 @@ def query_yandex_gpt(prompt: str, context: str = "", max_tokens: int = 2000) -> 
         logger.error(f"Ошибка YandexGPT: {e}")
         return f"Ошибка при обращении к YandexGPT: {str(e)}"
 
-def run_analysis(session_id: str, repo_url: str, branch: Optional[str] = None):
+# ========== НОВАЯ АСИНХРОННАЯ ФУНКЦИЯ АНАЛИЗА С КЭШЕМ И ТАЙМАУТОМ ==========
+async def run_analysis_async(session_id: str, repo_url: str, branch: Optional[str] = None):
+    """Асинхронная версия run_analysis с поддержкой кэширования и таймаутом 300 сек."""
     session = SESSIONS.get(session_id)
     if not session:
         return
     session["status"] = "in_progress"
     scanner = None
-
-    # Проверяем кэш, если доступен
-    commit_sha = None
-    if CACHE_AVAILABLE and cache_manager:
-        commit_sha = get_commit_sha(repo_url)
-        if commit_sha:
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                cached = loop.run_until_complete(
-                    cache_manager.get_cached_report(repo_url, branch or "main", commit_sha)
-                )
-                loop.close()
-                if cached:
-                    session["report"] = cached
-                    session["status"] = "done"
-                    return
-            except Exception as e:
-                logger.warning(f"Ошибка при обращении к кэшу: {e}")
-
-    # Таймаут на весь анализ (5 минут)
-    ANALYSIS_TIMEOUT = 300
     try:
-        # Запускаем анализ с таймаутом через asyncio (синхронная обёртка)
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(
-            asyncio.wait_for(
-                _run_analysis_async(session_id, repo_url, branch),
-                timeout=ANALYSIS_TIMEOUT
+        # 1. Получить последний коммит SHA
+        commit_sha = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "ls-remote", repo_url, "HEAD",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
             )
-        )
-        loop.close()
-    except asyncio.TimeoutError:
-        session["status"] = "error"
-        session["error"] = f"Анализ превысил лимит времени ({ANALYSIS_TIMEOUT} сек)"
-        logger.error(f"Таймаут анализа для сессии {session_id}")
-    except Exception as e:
-        session["status"] = "error"
-        session["error"] = str(e)
-        logger.exception(f"Ошибка в run_analysis для сессии {session_id}")
-    finally:
-        # Очистка временной папки
-        if scanner and hasattr(scanner, 'cleanup'):
-            scanner.cleanup()
-        elif scanner and hasattr(scanner, 'local_path') and os.path.exists(scanner.local_path):
-            shutil.rmtree(scanner.local_path, ignore_errors=True)
-
-async def _run_analysis_async(session_id: str, repo_url: str, branch: Optional[str] = None):
-    """Асинхронная версия анализа для возможности таймаута."""
-    session = SESSIONS.get(session_id)
-    if not session:
-        return
-
-    comps = None
-    try:
-        # Создаём компоненты в потоке (т.к. они синхронные)
-        loop = asyncio.get_event_loop()
-        comps = await loop.run_in_executor(None, create_components, repo_url)
-        scanner = comps["scanner"]
-        files = comps["files"]
-        # Сохраняем scanner для очистки
-        session["_scanner"] = scanner
-
-        project_analyzer = comps["project_analyzer"]
-        ast_analyzer = comps["ast_analyzer"]
-        linter = comps["linter_runner"]
-
-        # Git Analyzer
-        git_stats = None
-        try:
-            git_analyzer = GitAnalyzer(scanner.local_path)
-            git_stats = git_analyzer.analyze()
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+            if proc.returncode == 0 and stdout:
+                commit_sha = stdout.decode().split()[0]
         except Exception as e:
-            git_stats = {"error": str(e)}
+            logger.warning(f"Не удалось получить commit SHA: {e}")
 
-        # Dependency Analyzer
-        dep_stats = None
-        try:
-            dep_analyzer = DependencyAnalyzer(scanner.local_path)
-            dep_stats = dep_analyzer.analyze()
-        except Exception as e:
-            dep_stats = {"error": str(e)}
+        # 2. Проверка кэша
+        if commit_sha:
+            cached_report = await cache_manager.get_cached_report(repo_url, branch or "main", commit_sha)
+            if cached_report:
+                logger.info(f"Возвращаем кэшированный отчёт для {repo_url}")
+                session["report"] = cached_report
+                session["status"] = "done"
+                return
 
-        # Multi-Language Analyzer
-        multi_lang_issues = {}
-        try:
-            mla = MultiLangAnalyzer()
-            multi_lang_issues = mla.analyze(files)
-        except Exception as e:
-            multi_lang_issues = {"error": str(e)}
+        # 3. Анализ с таймаутом
+        async def _analysis():
+            nonlocal scanner
+            comps = await asyncio.to_thread(create_components, repo_url)
+            scanner = comps["scanner"]
+            files = comps["files"]
+            project_analyzer = comps["project_analyzer"]
+            ast_analyzer = comps["ast_analyzer"]
+            linter = comps["linter_runner"]
 
-        project_issues = project_analyzer.analyze(files)
-        ast_issues = {}
-        for path, content in files.items():
-            if path.endswith(".py"):
-                ast_issues[path] = ast_analyzer.analyze(content)
-        lint_issues = linter.run_all(files)
+            # Git статистика
+            git_stats = await asyncio.to_thread(lambda: GitAnalyzer(scanner.local_path).analyze())
+            # Зависимости
+            dep_stats = await asyncio.to_thread(lambda: DependencyAnalyzer(scanner.local_path).analyze())
+            # Мультиязычный анализ
+            multi_lang_issues = await asyncio.to_thread(lambda: MultiLangAnalyzer().analyze(files))
+            # Проектные проблемы
+            project_issues = await asyncio.to_thread(project_analyzer.analyze, files)
 
-        report = {
-            "project_issues": project_issues,
-            "ast_issues": ast_issues,
-            "lint_issues": lint_issues,
-            "multi_lang_issues": multi_lang_issues,
-        }
+            # AST анализ
+            ast_issues = {}
+            for path, content in files.items():
+                if path.endswith(".py"):
+                    ast_issues[path] = await asyncio.to_thread(ast_analyzer.analyze, content)
 
-        # Аудит Prizolov
-        try:
-            auditor = PrizolovAuditor()
-            audit_results = auditor.audit(files)
-            serialized_audit = {}
-            for level, issues in audit_results.items():
-                serialized_audit[level] = [
-                    f"[{i.criticality.upper()}] {i.file}:{i.line} - {i.message}"
-                    for i in issues
-                ]
-            report["audit"] = serialized_audit
-        except Exception as e:
-            report["audit"] = {"error": str(e)}
+            # Линтеры (уже параллельный внутри)
+            lint_issues = await asyncio.to_thread(linter.run_all, files)
 
-        report["git_stats"] = git_stats
-        report["dep_stats"] = dep_stats
-
-        # Semantic AI
-        semantic = None
-        try:
-            ai = SemanticAI()
-            context = report_to_summary(report)
-            hist_ctx = _get_audit_context(scanner.local_path)
-            if hist_ctx:
-                context = hist_ctx + "\n\n" + context
-            code_purpose = ai.analyze_code_purpose(context)
-            arch_eval = ai.evaluate_architecture(context)
-            risk_assessment = ai.assess_risk(context)
-            value_estimation = ai.estimate_value(context)
-            semantic = {
-                "code_purpose": code_purpose,
-                "architecture_evaluation": arch_eval,
-                "risk_assessment": risk_assessment,
-                "value_estimation": value_estimation,
+            report = {
+                "project_issues": project_issues,
+                "ast_issues": ast_issues,
+                "lint_issues": lint_issues,
+                "multi_lang_issues": multi_lang_issues,
+                "git_stats": git_stats,
+                "dep_stats": dep_stats,
             }
-        except Exception as e:
-            semantic = {"error": f"Ошибка семантического анализа: {str(e)}"}
-        report["semantic"] = semantic
 
-        # Scoring Engine
-        scoring = None
-        try:
-            engine = ScoringEngine()
-            scoring = engine.compute(report)
-        except Exception as e:
-            scoring = {"error": str(e)}
-        report["scoring"] = scoring
+            # Аудит Prizolov
+            try:
+                auditor = PrizolovAuditor()
+                audit_results = await asyncio.to_thread(auditor.audit, files)
+                serialized_audit = {}
+                for level, issues in audit_results.items():
+                    serialized_audit[level] = [
+                        f"[{i.criticality.upper()}] {i.file}:{i.line} - {i.message}"
+                        for i in issues
+                    ]
+                report["audit"] = serialized_audit
+            except Exception as e:
+                report["audit"] = {"error": str(e)}
 
-        # Smart Triage
-        triage = None
-        try:
-            triager = SmartTriage()
+            # Semantic AI
+            semantic = None
+            try:
+                ai = SemanticAI()
+                context = report_to_summary(report)
+                hist_ctx = _get_audit_context(scanner.local_path)
+                if hist_ctx:
+                    context = hist_ctx + "\n\n" + context
+                semantic = {
+                    "code_purpose": await asyncio.to_thread(ai.analyze_code_purpose, context),
+                    "architecture_evaluation": await asyncio.to_thread(ai.evaluate_architecture, context),
+                    "risk_assessment": await asyncio.to_thread(ai.assess_risk, context),
+                    "value_estimation": await asyncio.to_thread(ai.estimate_value, context),
+                }
+            except Exception as e:
+                semantic = {"error": str(e)}
+            report["semantic"] = semantic
+
+            # Scoring Engine
+            scoring = await asyncio.to_thread(lambda: ScoringEngine().compute(report))
+            report["scoring"] = scoring
+
+            # Smart Triage
             all_issues = []
             if "audit" in report:
                 for issues in report["audit"].values():
                     all_issues.extend(issues)
-            triage = triager.prioritize(all_issues)
-        except Exception as e:
-            triage = [{"issue": "Ошибка Smart Triage", "priority": 0, "reason": str(e), "effort": "?"}]
-        report["triage"] = triage
+            triage = await asyncio.to_thread(lambda: SmartTriage().prioritize(all_issues))
+            report["triage"] = triage
 
-        # ROI Calculator
-        roi = None
-        try:
-            roi_calc = ROICalculator(hourly_rate=50.0)
-            roi = roi_calc.compute(report, scoring)
-        except Exception as e:
-            roi = {"error": f"Ошибка расчёта ROI: {str(e)}"}
-        report["roi"] = roi
+            # ROI Calculator
+            roi = await asyncio.to_thread(lambda: ROICalculator(hourly_rate=50.0).compute(report, scoring))
+            report["roi"] = roi
 
-        # Сохраняем аудит
-        _save_audit_record(session_id, scanner.local_path, report_to_summary(report), scoring)
+            return report, scanner, files
+
+        report, scanner, files = await asyncio.wait_for(_analysis(), timeout=300)
+
+        # Сохраняем в кэш
+        if commit_sha:
+            await cache_manager.set_cached_report(repo_url, branch or "main", commit_sha, report)
 
         # Обновляем лидерборд
         if LEADERBOARD is not None:
             primary_lang = "unknown"
-            if semantic and not semantic.get("error") and semantic.get("code_purpose"):
-                techs = semantic["code_purpose"].get("key_technologies", [])
+            if semantic and not semantic.get("error"):
+                techs = semantic.get("code_purpose", {}).get("key_technologies", [])
                 if techs:
                     primary_lang = techs[0]
             LEADERBOARD.add_result(repo_url, scoring, primary_lang)
 
         session["report"] = report
-        session["status"] = "done"
         session["files"] = files
+        session["status"] = "done"
 
-        # Сохраняем в кэш, если доступен
-        if CACHE_AVAILABLE and cache_manager and commit_sha:
-            try:
-                loop = asyncio.get_event_loop()
-                await cache_manager.set_cached_report(repo_url, branch or "main", commit_sha, report)
-            except Exception as e:
-                logger.warning(f"Не удалось сохранить в кэш: {e}")
-
+    except asyncio.TimeoutError:
+        session["status"] = "error"
+        session["error"] = "Анализ превысил лимит времени (300 секунд)"
+        logger.error(f"Таймаут анализа для {repo_url}")
     except Exception as e:
         session["status"] = "error"
         session["error"] = str(e)
-        raise
+        logger.exception("Ошибка в run_analysis_async")
     finally:
         # Очистка временной папки
-        if comps and comps.get("scanner"):
-            comps["scanner"].cleanup()
+        if scanner and hasattr(scanner, 'local_path') and os.path.exists(scanner.local_path):
+            await asyncio.to_thread(shutil.rmtree, scanner.local_path, ignore_errors=True)
 
 # ========== ЭНДПОИНТЫ ==========
-@app.get("/health")
-async def health_check():
-    """Эндпоинт для проверки работоспособности."""
-    status = {"status": "ok", "cache_available": CACHE_AVAILABLE}
-    if CACHE_AVAILABLE and cache_manager:
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            await cache_manager.connect()
-            loop.close()
-            status["redis"] = "connected"
-        except Exception as e:
-            status["redis"] = f"error: {e}"
-    return status
-
 @app.post("/scan")
 async def start_scan(request: RepoRequest, background_tasks: BackgroundTasks):
     session_id = str(uuid.uuid4())
@@ -594,7 +501,7 @@ async def start_scan(request: RepoRequest, background_tasks: BackgroundTasks):
         "status": "pending",
         "report": None,
     }
-    background_tasks.add_task(run_analysis, session_id, str(request.repo_url), request.branch)
+    background_tasks.add_task(lambda: asyncio.run(run_analysis_async(session_id, str(request.repo_url), request.branch)))
     return {"session_id": session_id}
 
 @app.get("/status/{session_id}")
@@ -779,7 +686,7 @@ async def chat_advisor(session_id: str, req: AdvisorChatRequest):
             hist_ctx = _get_audit_context(scanner.local_path)
             if hist_ctx:
                 context = hist_ctx + "\n\n" + context
-            scanner.cleanup()
+            shutil.rmtree(scanner.local_path, ignore_errors=True)
         except Exception as e:
             logger.warning(f"Ошибка получения контекста: {e}")
 
@@ -1004,7 +911,7 @@ async def chat(session_id: str, req: ChatRequest):
             hist_ctx = _get_audit_context(scanner.local_path)
             if hist_ctx:
                 context = hist_ctx + "\n\n" + context
-            scanner.cleanup()
+            shutil.rmtree(scanner.local_path, ignore_errors=True)
         except Exception as e:
             logger.warning(f"Ошибка получения контекста: {e}")
     reply = query_yandex_gpt(req.message, context)
@@ -1021,7 +928,7 @@ async def download_repo(session_id: str):
             scanner = RepositoryScanner(session["repo_url"])
             scanner.clone()
             files = scanner.scan_repository()
-            scanner.cleanup()
+            shutil.rmtree(scanner.local_path, ignore_errors=True)
         except Exception as e:
             raise HTTPException(500, f"Не удалось получить файлы: {e}")
     zip_buffer = io.BytesIO()
@@ -1046,13 +953,17 @@ async def update_savings(req: SavingsUpdateRequest):
     SAVINGS["money"] += req.money
     return SAVINGS
 
+@app.on_event("startup")
+async def startup():
+    await cache_manager.connect()
+    logger.info("Кэш-менеджер инициализирован (Redis)")
+
 @app.on_event("shutdown")
-async def cleanup():
+async def shutdown():
+    await cache_manager.close()
     tmp = "/tmp/repo_scan"
     if os.path.exists(tmp):
         shutil.rmtree(tmp, ignore_errors=True)
-    if CACHE_AVAILABLE and cache_manager and hasattr(cache_manager, 'redis') and cache_manager.redis:
-        await cache_manager.redis.close()
 
 if __name__ == "__main__":
     import uvicorn
