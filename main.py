@@ -6,11 +6,7 @@
 # ============================================
 
 """
-Repo Validator Agent — FastAPI сервис (линтеры, автофиксы, AI-чат, копирайт, GitHub PR,
-Пятиуровневый аудит, Цифровой совет директоров, Арбитраж, Центр техдолга, Git Analyzer,
-Dependency Intelligence, Semantic AI Layer, Scoring Engine, Smart Triage, Contextual Mentor,
-ROI Calculator, Audit Trail, Repo Publisher, Multi-Language Support, Autonomous Pipeline,
-Public Leaderboard)
+Repo Validator Agent — FastAPI сервис с кэшированием и таймаутами
 """
 import os
 import uuid
@@ -28,11 +24,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, HttpUrl
 import requests
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Импорт конфигурации (создайте config.py)
 try:
     from config import settings
 except ImportError:
@@ -43,33 +37,31 @@ except ImportError:
 
 # ========== ФУНКЦИЯ СОЗДАНИЯ КЛАССОВ-ЗАГЛУШЕК ==========
 def make_stub_class(name: str):
-    """Создаёт класс-заглушку, который можно инстанцировать, и его методы ничего не делают."""
     class StubClass:
         def __init__(self, *args, **kwargs):
-            logger.warning(f"[STUB] {name} инициализирован с args={args}, kwargs={kwargs}")
+            logger.warning(f"[STUB] {name} инициализирован")
         def __getattr__(self, item):
-            logger.warning(f"[STUB] {name}.{item} вызван, но не реализован")
+            logger.warning(f"[STUB] {name}.{item} вызван")
             def stub_method(*args, **kwargs):
-                logger.warning(f"[STUB] {name}.{item}({args}, {kwargs}) — заглушка")
+                logger.warning(f"[STUB] {name}.{item} — заглушка")
                 return {} if item != "analyze" else {}
             return stub_method
     StubClass.__name__ = name
     return StubClass
 
-# ========== ЗАГРУЗКА МОДУЛЕЙ CORE С ЗАГЛУШКАМИ ==========
+# ========== ЗАГРУЗКА МОДУЛЕЙ CORE ==========
 core_classes = {}
 
 def safe_import_class(module_name, class_name):
     try:
         module = __import__(f"core.{module_name}", fromlist=[class_name])
         cls = getattr(module, class_name)
-        logger.info(f"Загружен {class_name} из core.{module_name}")
+        logger.info(f"Загружен {class_name}")
         return cls
     except (ImportError, AttributeError) as e:
-        logger.warning(f"Не удалось импортировать {class_name} из core.{module_name}: {e}")
+        logger.warning(f"Не удалось импортировать {class_name}: {e}")
         return make_stub_class(class_name)
 
-# Список необходимых классов
 required_classes = [
     ("repository_scanner", "RepositoryScanner"),
     ("project_analyzer", "ProjectAnalyzer"),
@@ -96,7 +88,6 @@ required_classes = [
 for mod, cls in required_classes:
     core_classes[cls] = safe_import_class(mod, cls)
 
-# Извлекаем классы в глобальное пространство
 RepositoryScanner = core_classes["RepositoryScanner"]
 ProjectAnalyzer = core_classes["ProjectAnalyzer"]
 StepFixEngine = core_classes["StepFixEngine"]
@@ -118,33 +109,23 @@ RepoPublisher = core_classes["RepoPublisher"]
 MultiLangAnalyzer = core_classes["MultiLangAnalyzer"]
 Leaderboard = core_classes["Leaderboard"]
 
-# ========== Импорт кэш-менеджера ==========
 from core.cache_manager import CacheManager
 
-# ========== FastAPI ==========
 app = FastAPI(title="Repo Validator Agent")
 
-# ----- CORS -----
-origins = [
-    "https://prizolov.ru",
-    "http://localhost",
-    "http://127.0.0.1",
-]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["https://prizolov.ru", "http://localhost", "http://127.0.0.1"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ========== ГЛОБАЛЬНЫЕ ХРАНИЛИЩА ==========
 SESSIONS: Dict[str, dict] = {}
 SAVINGS = {"fixed": 0, "hours": 0.0, "money": 0.0}
 LEADERBOARD = Leaderboard() if Leaderboard is not None else None
 cache_manager = CacheManager()
 
-# ========== МОДЕЛИ ==========
 class RepoRequest(BaseModel):
     repo_url: HttpUrl
     branch: Optional[str] = None
@@ -192,7 +173,6 @@ class SavingsUpdateRequest(BaseModel):
     hours: float = 0.0
     money: float = 0.0
 
-# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def create_components(repo_url: str):
     scanner = RepositoryScanner(repo_url)
     scanner.clone()
@@ -209,34 +189,27 @@ def create_components(repo_url: str):
     }
 
 def report_to_summary(report: dict) -> str:
-    """Безопасное формирование текстового отчёта"""
     lines = []
-    # Проектные проблемы
     if report.get("project_issues"):
         lines.append("Проблемы проекта:\n" + "\n".join(report["project_issues"]))
-    # AST проблемы
     if report.get("ast_issues"):
         for f, issues in report["ast_issues"].items():
             if issues:
                 lines.append(f"AST ({f}):\n" + "\n".join(issues))
-    # Линтеры
     if report.get("lint_issues"):
         for f, issues in report["lint_issues"].items():
             if issues:
                 lines.append(f"Линтеры ({f}):\n" + "\n".join(issues))
-    # Мультиязычный анализ
     if report.get("multi_lang_issues"):
         for f, issues in report["multi_lang_issues"].items():
             if issues:
                 lines.append(f"Мультиязычный анализ ({f}):\n" + "\n".join(issues))
-    # Аудит Prizolov
     if report.get("audit"):
         level_names = {"architecture": "Архитектура", "security": "Безопасность",
                        "performance": "Производительность", "documentation": "Документированность"}
         for level, issues in report["audit"].items():
             if issues:
                 lines.append(f"Аудит {level_names.get(level, level)}:\n" + "\n".join(issues))
-    # Git статистика
     git_stats = report.get("git_stats")
     if git_stats and isinstance(git_stats, dict) and not git_stats.get("error"):
         lines.append(
@@ -246,14 +219,12 @@ def report_to_summary(report: dict) -> str:
             f"- Активность: {'активен' if git_stats.get('is_active') else 'заброшен'}\n"
             f"- Последний коммит: {git_stats.get('last_commit', '?')}"
         )
-    # Зависимости
     dep_stats = report.get("dep_stats")
     if dep_stats and isinstance(dep_stats, dict):
         if dep_stats.get("vulnerabilities"):
             lines.append(f"Найдены уязвимости в зависимостях: {len(dep_stats['vulnerabilities'])}")
         if dep_stats.get("licenses"):
             lines.append(f"Лицензий проанализировано: {len(dep_stats['licenses'])}")
-    # Семантический AI
     semantic = report.get("semantic")
     if semantic and isinstance(semantic, dict) and not semantic.get("error"):
         cp = semantic.get("code_purpose")
@@ -263,7 +234,6 @@ def report_to_summary(report: dict) -> str:
                 f"- Тип проекта: {cp.get('project_type', 'неизвестен')}\n"
                 f"- Назначение: {cp.get('description', '')[:200]}..."
             )
-    # Скоринг
     scoring = report.get("scoring")
     if scoring and isinstance(scoring, dict) and not scoring.get("error"):
         lines.append(
@@ -273,7 +243,6 @@ def report_to_summary(report: dict) -> str:
             f"Readiness: {scoring.get('readiness', '?')}%\n"
             f"Tech Debt: {scoring.get('tech_debt_hours', '?')}h (${scoring.get('tech_debt_money', '?')})"
         )
-    # ROI
     roi = report.get("roi")
     if roi and isinstance(roi, dict) and not roi.get("error"):
         lines.append(
@@ -308,20 +277,13 @@ def query_yandex_gpt(prompt: str, context: str = "", max_tokens: int = 2000) -> 
         return "Ошибка: не настроен YANDEX_API_KEY"
     folder_id = os.getenv("YANDEX_FOLDER_ID", "b1gfhnp4aeamnaflt8g0")
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
-    headers = {
-        "Authorization": f"Api-Key {api_key}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Api-Key {api_key}", "Content-Type": "application/json"}
     max_context_len = 3000
     if len(context) > max_context_len:
         context = context[:max_context_len] + "\n... (контекст обрезан)"
     payload = {
         "modelUri": f"gpt://{folder_id}/yandexgpt-lite",
-        "completionOptions": {
-            "stream": False,
-            "temperature": 0.6,
-            "maxTokens": max_tokens
-        },
+        "completionOptions": {"stream": False, "temperature": 0.6, "maxTokens": max_tokens},
         "messages": [
             {"role": "system", "text": "Ты — AI-консультант по анализу репозиториев. Отвечай кратко и по делу на русском языке."},
             {"role": "user", "text": f"Контекст отчёта:\n{context}\n\n{prompt}"}
@@ -334,22 +296,18 @@ def query_yandex_gpt(prompt: str, context: str = "", max_tokens: int = 2000) -> 
         alternatives = data.get("result", {}).get("alternatives", [])
         if alternatives:
             return alternatives[0].get("message", {}).get("text", "Нет ответа")
-        else:
-            return "Модель не вернула ответ."
+        return "Модель не вернула ответ."
     except Exception as e:
         logger.error(f"Ошибка YandexGPT: {e}")
-        return f"Ошибка при обращении к YandexGPT: {str(e)}"
+        return f"Ошибка: {str(e)}"
 
-# ========== АСИНХРОННАЯ ФУНКЦИЯ АНАЛИЗА С КЭШЕМ И ТАЙМАУТОМ ==========
 async def run_analysis_async(session_id: str, repo_url: str, branch: Optional[str] = None):
-    """Асинхронная версия run_analysis с поддержкой кэширования и таймаутом 300 сек."""
     session = SESSIONS.get(session_id)
     if not session:
         return
     session["status"] = "in_progress"
     scanner = None
     try:
-        # 1. Получить последний коммит SHA
         commit_sha = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -363,16 +321,14 @@ async def run_analysis_async(session_id: str, repo_url: str, branch: Optional[st
         except Exception as e:
             logger.warning(f"Не удалось получить commit SHA: {e}")
 
-        # 2. Проверка кэша
         if commit_sha:
-            cached_report = await cache_manager.get_cached_report(repo_url, branch or "main", commit_sha)
-            if cached_report:
-                logger.info(f"Возвращаем кэшированный отчёт для {repo_url}")
-                session["report"] = cached_report
+            cached = await cache_manager.get_cached_report(repo_url, branch or "main", commit_sha)
+            if cached:
+                logger.info(f"Кэш для {repo_url}")
+                session["report"] = cached
                 session["status"] = "done"
                 return
 
-        # 3. Анализ с таймаутом
         async def _analysis():
             nonlocal scanner
             comps = await asyncio.to_thread(create_components, repo_url)
@@ -382,22 +338,16 @@ async def run_analysis_async(session_id: str, repo_url: str, branch: Optional[st
             ast_analyzer = comps["ast_analyzer"]
             linter = comps["linter_runner"]
 
-            # Git статистика
             git_stats = await asyncio.to_thread(lambda: GitAnalyzer(scanner.local_path).analyze())
-            # Зависимости
             dep_stats = await asyncio.to_thread(lambda: DependencyAnalyzer(scanner.local_path).analyze())
-            # Мультиязычный анализ
             multi_lang_issues = await asyncio.to_thread(lambda: MultiLangAnalyzer().analyze(files))
-            # Проектные проблемы
             project_issues = await asyncio.to_thread(project_analyzer.analyze, files)
 
-            # AST анализ
             ast_issues = {}
             for path, content in files.items():
                 if path.endswith(".py"):
                     ast_issues[path] = await asyncio.to_thread(ast_analyzer.analyze, content)
 
-            # Линтеры
             lint_issues = await asyncio.to_thread(linter.run_all, files)
 
             report = {
@@ -409,43 +359,36 @@ async def run_analysis_async(session_id: str, repo_url: str, branch: Optional[st
                 "dep_stats": dep_stats,
             }
 
-            # Аудит Prizolov
             try:
                 auditor = PrizolovAuditor()
                 audit_results = await asyncio.to_thread(auditor.audit, files)
                 serialized_audit = {}
                 for level, issues in audit_results.items():
                     serialized_audit[level] = [
-                        f"[{i.criticality.upper()}] {i.file}:{i.line} - {i.message}"
-                        for i in issues
+                        f"[{i.criticality.upper()}] {i.file}:{i.line} - {i.message}" for i in issues
                     ]
                 report["audit"] = serialized_audit
             except Exception as e:
                 report["audit"] = {"error": str(e)}
 
-            # Semantic AI
-            semantic = None
             try:
                 ai = SemanticAI()
                 context = report_to_summary(report)
                 hist_ctx = _get_audit_context(scanner.local_path)
                 if hist_ctx:
                     context = hist_ctx + "\n\n" + context
-                semantic = {
+                report["semantic"] = {
                     "code_purpose": await asyncio.to_thread(ai.analyze_code_purpose, context),
                     "architecture_evaluation": await asyncio.to_thread(ai.evaluate_architecture, context),
                     "risk_assessment": await asyncio.to_thread(ai.assess_risk, context),
                     "value_estimation": await asyncio.to_thread(ai.estimate_value, context),
                 }
             except Exception as e:
-                semantic = {"error": str(e)}
-            report["semantic"] = semantic
+                report["semantic"] = {"error": str(e)}
 
-            # Scoring Engine
             scoring = await asyncio.to_thread(lambda: ScoringEngine().compute(report))
             report["scoring"] = scoring
 
-            # Smart Triage
             all_issues = []
             if "audit" in report:
                 for issues in report["audit"].values():
@@ -453,7 +396,6 @@ async def run_analysis_async(session_id: str, repo_url: str, branch: Optional[st
             triage = await asyncio.to_thread(lambda: SmartTriage().prioritize(all_issues))
             report["triage"] = triage
 
-            # ROI Calculator
             roi = await asyncio.to_thread(lambda: ROICalculator(hourly_rate=50.0).compute(report, scoring))
             report["roi"] = roi
 
@@ -461,19 +403,17 @@ async def run_analysis_async(session_id: str, repo_url: str, branch: Optional[st
 
         report, scanner, files = await asyncio.wait_for(_analysis(), timeout=300)
 
-        # Сохраняем в кэш
         if commit_sha:
             await cache_manager.set_cached_report(repo_url, branch or "main", commit_sha, report)
 
-        # Обновляем лидерборд
         if LEADERBOARD is not None:
             primary_lang = "unknown"
-            semantic = report.get("semantic", {})
-            if not semantic.get("error"):
-                techs = semantic.get("code_purpose", {}).get("key_technologies", [])
+            sem = report.get("semantic", {})
+            if not sem.get("error"):
+                techs = sem.get("code_purpose", {}).get("key_technologies", [])
                 if techs:
                     primary_lang = techs[0]
-            LEADERBOARD.add_result(repo_url, report.get("scoring", {}), primary_lang)
+            LEADERBOARD.add_result(repo_url, scoring, primary_lang)
 
         session["report"] = report
         session["files"] = files
@@ -481,14 +421,13 @@ async def run_analysis_async(session_id: str, repo_url: str, branch: Optional[st
 
     except asyncio.TimeoutError:
         session["status"] = "error"
-        session["error"] = "Анализ превысил лимит времени (300 секунд)"
-        logger.error(f"Таймаут анализа для {repo_url}")
+        session["error"] = "Таймаут 300 секунд"
+        logger.error(f"Таймаут для {repo_url}")
     except Exception as e:
         session["status"] = "error"
         session["error"] = str(e)
         logger.exception("Ошибка в run_analysis_async")
     finally:
-        # Безопасная очистка временной папки
         if scanner:
             local_path = getattr(scanner, 'local_path', None)
             if isinstance(local_path, str) and os.path.exists(local_path):
@@ -496,7 +435,7 @@ async def run_analysis_async(session_id: str, repo_url: str, branch: Optional[st
 
 # ========== ЭНДПОИНТЫ ==========
 @app.post("/scan")
-async def start_scan(request: RepoRequest, background_tasks: BackgroundTasks):
+async def start_scan(request: RepoRequest):
     session_id = str(uuid.uuid4())
     SESSIONS[session_id] = {
         "repo_url": str(request.repo_url),
@@ -504,23 +443,16 @@ async def start_scan(request: RepoRequest, background_tasks: BackgroundTasks):
         "status": "pending",
         "report": None,
     }
-    # Правильный запуск асинхронной задачи
-    async def _run():
-        await run_analysis_async(session_id, str(request.repo_url), request.branch)
-    background_tasks.add_task(lambda: asyncio.create_task(_run()))
+    # Запускаем фоновую задачу напрямую через asyncio.create_task
+    asyncio.create_task(run_analysis_async(session_id, str(request.repo_url), request.branch))
     return {"session_id": session_id}
 
 @app.get("/status/{session_id}")
 async def get_status(session_id: str):
     session = SESSIONS.get(session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Сессия не найдена")
-    resp = {"session_id": session_id, "status": session["status"]}
-    if session["status"] == "done":
-        resp["report"] = session["report"]
-    elif session["status"] == "error":
-        resp["error"] = session.get("error", "Неизвестная ошибка")
-    return resp
+        raise HTTPException(404, "Сессия не найдена")
+    return {"session_id": session_id, "status": session["status"], "error": session.get("error")}
 
 @app.get("/report/{session_id}")
 async def get_report(session_id: str):
@@ -529,67 +461,43 @@ async def get_report(session_id: str):
         raise HTTPException(404, "Сессия не найдена")
     if session.get("status") != "done":
         raise HTTPException(400, "Отчёт ещё не готов")
-    summary = report_to_summary(session["report"])
-    return {
-        "session_id": session_id,
-        "report_summary": summary,
-    }
+    return {"session_id": session_id, "report_summary": report_to_summary(session["report"])}
 
 @app.get("/changes/{session_id}")
 async def get_changes(session_id: str):
     session = SESSIONS.get(session_id)
     if not session:
         raise HTTPException(404, "Сессия не найдена")
-    return {
-        "session_id": session_id,
-        "files_changed": [],
-        "patch_summary": "Для применения автоматических исправлений нажмите «Применить автофиксы».",
-    }
+    return {"files_changed": [], "patch_summary": "Для применения автофиксов нажмите кнопку."}
 
 @app.post("/fix/{session_id}")
 async def apply_fixes(session_id: str):
     session = SESSIONS.get(session_id)
-    if not session:
-        raise HTTPException(404, "Сессия не найдена")
-    if session.get("status") != "done":
-        raise HTTPException(400, "Отчёт ещё не готов")
-
+    if not session or session.get("status") != "done":
+        raise HTTPException(404, "Отчёт не готов")
     engine = StepFixEngine()
     files = session.get("files", {})
     if not files:
-        raise HTTPException(500, "Нет файлов для обработки")
-
+        raise HTTPException(500, "Нет файлов")
     new_files = engine.format_all(files)
     session["fixed_files"] = new_files
-
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for path, content in new_files.items():
             zf.writestr(path, content)
     zip_buffer.seek(0)
-
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/zip",
-        headers={
-            "Content-Disposition": f"attachment; filename=repo_{session_id}_fixed.zip",
-            "X-Fixed-Files": ",".join(getattr(engine, 'fixes_applied', []))
-        }
-    )
+    return StreamingResponse(zip_buffer, media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=repo_{session_id}_fixed.zip"})
 
 @app.get("/recommendations/{session_id}")
 async def get_recommendations(session_id: str):
     session = SESSIONS.get(session_id)
-    if not session:
-        raise HTTPException(404, "Сессия не найдена")
+    if not session or session.get("status") != "done":
+        raise HTTPException(404, "Отчёт не готов")
     report = session.get("report", {})
-    if not report:
-        raise HTTPException(400, "Нет отчёта")
-
     api_key = os.getenv("YANDEX_API_KEY")
     if not api_key:
         return {"error": "AI ключ не настроен"}
-
     all_issues = []
     if report.get("project_issues"):
         all_issues.extend([f"Проект: {i}" for i in report["project_issues"]])
@@ -605,12 +513,10 @@ async def get_recommendations(session_id: str):
     for file, issues in report.get("multi_lang_issues", {}).items():
         for i in issues:
             all_issues.append(f"Lang ({file}): {i}")
-
     if not all_issues:
         return {"recommendations": "Ошибок нет"}
-
     sample_issues = all_issues[:10]
-    prompt = "Дай краткие рекомендации по исправлению каждой из следующих проблем (не более 2-3 предложений на пункт):\n" + "\n".join(sample_issues)
+    prompt = "Дай краткие рекомендации по исправлению каждой из следующих проблем:\n" + "\n".join(sample_issues)
     recommendations = query_yandex_gpt(prompt, max_tokens=500)
     return {"recommendations": recommendations.strip()}
 
@@ -621,8 +527,7 @@ async def create_pr(session_id: str, req: CreatePRRequest):
         raise HTTPException(404, "Сессия не найдена")
     files = session.get("fixed_files") or session.get("files")
     if not files:
-        raise HTTPException(400, "Нет файлов для коммита")
-
+        raise HTTPException(400, "Нет файлов")
     github = GitHubIntegration(req.github_token)
     summary = report_to_summary(session.get("report", {}))
     body = f"## Repo Validator Report\n```\n{summary}\n```"
@@ -638,7 +543,7 @@ async def create_pr(session_id: str, req: CreatePRRequest):
             raise HTTPException(500, "Не удалось создать PR")
         return {"pull_request_url": pr_url}
     except Exception as e:
-        raise HTTPException(500, f"Ошибка при создании PR: {str(e)}")
+        raise HTTPException(500, f"Ошибка: {str(e)}")
 
 @app.get("/copyright/{session_id}")
 async def check_copyright(session_id: str):
@@ -658,17 +563,11 @@ async def apply_copyright(session_id: str, req: CopyrightApplyRequest):
     mgr = CopyrightManager()
     files = session.get("fixed_files") or session.get("files", {})
     if not files:
-        raise HTTPException(400, "Нет файлов для обработки")
-    new_files = mgr.apply_copyright(
-        files,
-        copyright_text=req.copyright_text,
-        author=req.author,
-        organization=req.organization,
-        product=req.product,
-        skip_existing=True
-    )
+        raise HTTPException(400, "Нет файлов")
+    new_files = mgr.apply_copyright(files, copyright_text=req.copyright_text, author=req.author,
+                                   organization=req.organization, product=req.product, skip_existing=True)
     session["fixed_files"] = new_files
-    return {"session_id": session_id, "status": "applied", "message": "Авторские права добавлены."}
+    return {"status": "applied"}
 
 # ===== ЦИФРОВОЙ СОВЕТ ДИРЕКТОРОВ =====
 ROLE_PROMPTS = {
@@ -682,7 +581,7 @@ ROLE_PROMPTS = {
 async def chat_advisor(session_id: str, req: AdvisorChatRequest):
     session = SESSIONS.get(session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Сессия не найдена")
+        raise HTTPException(404, "Сессия не найдена")
     context = ""
     if session.get("report"):
         context = report_to_summary(session["report"])
@@ -695,34 +594,21 @@ async def chat_advisor(session_id: str, req: AdvisorChatRequest):
             shutil.rmtree(scanner.local_path, ignore_errors=True)
         except Exception as e:
             logger.warning(f"Ошибка получения контекста: {e}")
-
     system_prompt = ROLE_PROMPTS.get(req.role, ROLE_PROMPTS["analyst"])
     prompt = f"{system_prompt}\n\nКонтекст отчёта:\n{context}\n\nВопрос пользователя: {req.message}"
-
     api_key = os.getenv("YANDEX_API_KEY")
     if not api_key:
         return {"reply": "Ошибка: не настроен API-ключ YandexGPT."}
     folder_id = os.getenv("YANDEX_FOLDER_ID", "b1gfhnp4aeamnaflt8g0")
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
-    headers = {
-        "Authorization": f"Api-Key {api_key}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Api-Key {api_key}", "Content-Type": "application/json"}
     max_context_len = 2500
     if len(prompt) > max_context_len:
         prompt = f"{system_prompt}\n\nКонтекст отчёта (сокращён):\n{context[:max_context_len - len(system_prompt) - 50]}...\n\nВопрос пользователя: {req.message}"
-
     payload = {
         "modelUri": f"gpt://{folder_id}/yandexgpt-lite",
-        "completionOptions": {
-            "stream": False,
-            "temperature": 0.6,
-            "maxTokens": 2000
-        },
-        "messages": [
-            {"role": "system", "text": system_prompt},
-            {"role": "user", "text": prompt}
-        ]
+        "completionOptions": {"stream": False, "temperature": 0.6, "maxTokens": 2000},
+        "messages": [{"role": "system", "text": system_prompt}, {"role": "user", "text": prompt}]
     }
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=15)
@@ -731,50 +617,34 @@ async def chat_advisor(session_id: str, req: AdvisorChatRequest):
         alternatives = data.get("result", {}).get("alternatives", [])
         if alternatives:
             return {"reply": alternatives[0].get("message", {}).get("text", "Нет ответа")}
-        else:
-            return {"reply": "Модель не вернула ответ."}
+        return {"reply": "Модель не вернула ответ."}
     except Exception as e:
         logger.error(f"Ошибка в /chat/advisor: {e}")
-        return {"reply": f"Ошибка при обращении к YandexGPT: {str(e)}"}
+        return {"reply": f"Ошибка: {str(e)}"}
 
 @app.post("/chat/arbitrage/{session_id}")
 async def chat_arbitrage(session_id: str, req: ArbitrageRequest):
     session = SESSIONS.get(session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Сессия не найдена")
+        raise HTTPException(404, "Сессия не найдена")
     context = ""
     if session.get("report"):
         context = report_to_summary(session["report"])
     prompt = (
-        "Предложи два конкретных варианта исправления следующей проблемы в коде. "
-        "Первый вариант — с точки зрения архитектора (минимизация зависимостей, улучшение структуры). "
-        "Второй вариант — с точки зрения безопасности (защита от уязвимостей). "
-        "Оформи ответ строго в формате:\n"
-        "АРХИТЕКТОР: <предложение архитектора>\n"
-        "БЕЗОПАСНИК: <предложение безопасника>\n\n"
-        f"Проблема: {req.message}\n"
-        f"Контекст отчёта:\n{context}"
+        "Предложи два варианта исправления проблемы: архитектурный и безопасностный. "
+        "Оформи: АРХИТЕКТОР: <текст>\nБЕЗОПАСНИК: <текст>\n\n"
+        f"Проблема: {req.message}\nКонтекст: {context}"
     )
     api_key = os.getenv("YANDEX_API_KEY")
     if not api_key:
-        return {"architect": "Ошибка: не настроен API-ключ", "security": "Ошибка: не настроен API-ключ"}
+        return {"architect": "Ошибка API", "security": "Ошибка API"}
     folder_id = os.getenv("YANDEX_FOLDER_ID", "b1gfhnp4aeamnaflt8g0")
     url = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
-    headers = {
-        "Authorization": f"Api-Key {api_key}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Api-Key {api_key}", "Content-Type": "application/json"}
     payload = {
         "modelUri": f"gpt://{folder_id}/yandexgpt-lite",
-        "completionOptions": {
-            "stream": False,
-            "temperature": 0.7,
-            "maxTokens": 2000
-        },
-        "messages": [
-            {"role": "system", "text": "Ты — эксперт по анализу кода. Твоя задача — предложить два разных варианта исправления проблемы."},
-            {"role": "user", "text": prompt}
-        ]
+        "completionOptions": {"stream": False, "temperature": 0.7, "maxTokens": 2000},
+        "messages": [{"role": "system", "text": "Ты — эксперт по анализу кода."}, {"role": "user", "text": prompt}]
     }
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=20)
@@ -782,33 +652,24 @@ async def chat_arbitrage(session_id: str, req: ArbitrageRequest):
         data = resp.json()
         alternatives = data.get("result", {}).get("alternatives", [])
         if not alternatives:
-            return {"architect": "Модель не ответила", "security": "Модель не ответила"}
+            return {"architect": "Нет ответа", "security": "Нет ответа"}
         text = alternatives[0].get("message", {}).get("text", "")
         architect = ""
         security = ""
-        lines = text.split('\n')
-        current_role = None
-        for line in lines:
+        for line in text.split('\n'):
             if line.startswith("АРХИТЕКТОР:"):
-                current_role = "architect"
                 architect = line.replace("АРХИТЕКТОР:", "").strip()
             elif line.startswith("БЕЗОПАСНИК:"):
-                current_role = "security"
                 security = line.replace("БЕЗОПАСНИК:", "").strip()
-            elif current_role == "architect":
-                architect += " " + line.strip()
-            elif current_role == "security":
-                security += " " + line.strip()
-        return {"architect": architect.strip() or "Нет ответа", "security": security.strip() or "Нет ответа"}
+        return {"architect": architect or "Нет", "security": security or "Нет"}
     except Exception as e:
-        logger.error(f"Ошибка в /chat/arbitrage: {e}")
         return {"architect": f"Ошибка: {str(e)}", "security": f"Ошибка: {str(e)}"}
 
 @app.post("/chat/mentor/{session_id}")
 async def chat_mentor(session_id: str, req: MentorRequest):
     session = SESSIONS.get(session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Сессия не найдена")
+        raise HTTPException(404, "Сессия не найдена")
     mentor = ContextualMentor()
     suggestion = mentor.suggest_fix(req.issue, req.file_context)
     return {"reply": suggestion}
@@ -816,73 +677,47 @@ async def chat_mentor(session_id: str, req: MentorRequest):
 @app.post("/publish/{session_id}")
 async def publish_results(session_id: str, req: PublishRequest):
     session = SESSIONS.get(session_id)
-    if not session:
-        raise HTTPException(404, "Сессия не найдена")
-    if session.get("status") != "done":
-        raise HTTPException(400, "Отчёт ещё не готов")
-    report = session.get("report", {})
-    summary = report_to_summary(report)
+    if not session or session.get("status") != "done":
+        raise HTTPException(404, "Отчёт не готов")
+    summary = report_to_summary(session["report"])
     publisher = RepoPublisher(req.github_token)
     repo_url = session["repo_url"]
-    scoring = report.get("scoring", {})
-    repo_score_before = scoring.get("repo_score", 0)
-    body = (
-        f"## 🤖 Отчёт Repo Validator\n\n"
-        f"**Проверка выполнена:** {repo_url}\n"
-        f"**Агент:** Prizolov Repo Validator (автор: Dm.Andreyanov)\n"
-        f"**Дата проверки:** {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
-        f"**Оценка:** {repo_score_before}/100\n\n"
-        f"### Полный отчёт\n```\n{summary}\n```"
-    )
+    scoring = session["report"].get("scoring", {})
+    score = scoring.get("repo_score", 0)
+    body = f"## Отчёт\n\n**Репозиторий:** {repo_url}\n**Оценка:** {score}/100\n\n```\n{summary}\n```"
     if req.action == "issue":
-        title = "🤖 Repo Validator: проверка кода"
-        issue_url = publisher.publish_issue(repo_url, title, body)
+        issue_url = publisher.publish_issue(repo_url, "Repo Validator Report", body)
         if issue_url:
             return {"status": "success", "url": issue_url}
-        else:
-            raise HTTPException(500, "Не удалось создать Issue.")
+        raise HTTPException(500, "Не удалось создать Issue")
     elif req.action == "label":
-        label_name = f"repo-score-{int(repo_score_before)}"
-        description = f"Repo Score: {repo_score_before}/100 (проверено агентом)"
-        if repo_score_before >= 80:
-            color = "0e8a16"
-        elif repo_score_before >= 60:
-            color = "fbca04"
-        else:
-            color = "d93f0b"
-        success = publisher.set_label(repo_url, label_name, color, description)
+        label_name = f"repo-score-{int(score)}"
+        color = "0e8a16" if score >= 80 else ("fbca04" if score >= 60 else "d93f0b")
+        success = publisher.set_label(repo_url, label_name, color, f"Repo Score: {score}")
         if success:
             return {"status": "success", "label": label_name}
-        else:
-            raise HTTPException(500, "Не удалось установить метку.")
-    else:
-        raise HTTPException(400, "Неверный action. Допустимые значения: 'issue', 'label'.")
+        raise HTTPException(500, "Не удалось установить метку")
+    raise HTTPException(400, "Неверный action")
 
 @app.post("/autonomous-fix/{session_id}")
 async def autonomous_fix(session_id: str, req: AutonomousFixRequest):
     session = SESSIONS.get(session_id)
-    if not session:
-        raise HTTPException(404, "Сессия не найдена")
-    if session.get("status") != "done":
-        raise HTTPException(400, "Отчёт ещё не готов")
+    if not session or session.get("status") != "done":
+        raise HTTPException(404, "Отчёт не готов")
     engine = StepFixEngine()
     files = session.get("files", {})
     if not files:
-        raise HTTPException(500, "Нет файлов для обработки")
+        raise HTTPException(500, "Нет файлов")
     new_files = engine.format_all(files)
     if req.apply_copyright:
         mgr = CopyrightManager()
-        new_files = mgr.apply_copyright(
-            new_files,
-            author=req.copyright_author,
-            organization=req.copyright_organization,
-            product=req.copyright_product,
-            skip_existing=True
-        )
+        new_files = mgr.apply_copyright(new_files, author=req.copyright_author,
+                                        organization=req.copyright_organization,
+                                        product=req.copyright_product, skip_existing=True)
     session["fixed_files"] = new_files
     github = GitHubIntegration(req.github_token)
     summary = report_to_summary(session.get("report", {}))
-    body = f"## Автономный Fix Repo Validator\n```\n{summary}\n```"
+    body = f"## Autonomous Fix\n```\n{summary}\n```"
     try:
         pr_url = github.create_pr(
             repo_url=session["repo_url"],
@@ -895,19 +730,19 @@ async def autonomous_fix(session_id: str, req: AutonomousFixRequest):
             raise HTTPException(500, "Не удалось создать PR")
         return {"status": "success", "pull_request_url": pr_url}
     except Exception as e:
-        raise HTTPException(500, f"Ошибка при создании PR: {str(e)}")
+        raise HTTPException(500, f"Ошибка: {str(e)}")
 
 @app.get("/leaderboard")
 async def get_leaderboard(sort_by: str = "repo_score", language: str = None, limit: int = 10):
     if LEADERBOARD is None:
-        return {"error": "Лидерборд временно недоступен"}
+        return {"error": "Лидерборд недоступен"}
     return LEADERBOARD.get_top(limit=limit, sort_by=sort_by, language=language)
 
 @app.post("/chat/{session_id}")
 async def chat(session_id: str, req: ChatRequest):
     session = SESSIONS.get(session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Сессия не найдена")
+        raise HTTPException(404, "Сессия не найдена")
     context = ""
     if session.get("report"):
         context = report_to_summary(session["report"])
@@ -919,7 +754,7 @@ async def chat(session_id: str, req: ChatRequest):
                 context = hist_ctx + "\n\n" + context
             shutil.rmtree(scanner.local_path, ignore_errors=True)
         except Exception as e:
-            logger.warning(f"Ошибка получения контекста: {e}")
+            logger.warning(f"Ошибка: {e}")
     reply = query_yandex_gpt(req.message, context)
     return {"reply": reply}
 
@@ -927,7 +762,7 @@ async def chat(session_id: str, req: ChatRequest):
 async def download_repo(session_id: str):
     session = SESSIONS.get(session_id)
     if not session:
-        raise HTTPException(status_code=404, detail="Сессия не найдена")
+        raise HTTPException(404, "Сессия не найдена")
     files = session.get("fixed_files") or session.get("files", {})
     if not files:
         try:
@@ -942,11 +777,8 @@ async def download_repo(session_id: str):
         for path, content in files.items():
             zf.writestr(path, content)
     zip_buffer.seek(0)
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/zip",
-        headers={"Content-Disposition": f"attachment; filename=repo_{session_id}.zip"}
-    )
+    return StreamingResponse(zip_buffer, media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename=repo_{session_id}.zip"})
 
 @app.get("/savings")
 async def get_savings():
@@ -962,7 +794,7 @@ async def update_savings(req: SavingsUpdateRequest):
 @app.on_event("startup")
 async def startup():
     await cache_manager.connect()
-    logger.info("Кэш-менеджер инициализирован (Redis)")
+    logger.info("Кэш-менеджер инициализирован")
 
 @app.on_event("shutdown")
 async def shutdown():
